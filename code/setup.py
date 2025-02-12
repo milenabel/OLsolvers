@@ -61,14 +61,14 @@ def poisson_solver(domain_size=(12.0, 12.0), num_elements=(12, 12)):
 
     relative_L2_error = L2_norm / p_exact_L2_norm
 
-    print(f"L2 error norm: {L2_norm}")
-    print(f"H1 error norm: {H1_norm}")
-    print(f"Relative L2 error norm: {relative_L2_error}")
+    # print(f"L2 error norm: {L2_norm}")
+    # print(f"H1 error norm: {H1_norm}")
+    # print(f"Relative L2 error norm: {relative_L2_error}")
 
     return msh, uh, L2_norm, H1_norm, relative_L2_error
 
 if __name__ == "__main__":
-    mesh_sizes = [(12, 12), (24, 24), (48, 48), (96, 96)]
+    mesh_sizes = [(3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (24, 24), (48, 48), (96, 96)]
     for size in mesh_sizes:
         print(f"Running solver for mesh size: {size}")
         _, _, L2_norm, H1_norm, relative_L2_error = poisson_solver(num_elements=size)
