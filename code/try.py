@@ -71,13 +71,16 @@ class SubdomainSolver:
         self.refinement_factor = refinement_factor
         self.results_dir = results_dir
         os.makedirs(self.results_dir, exist_ok=True)
+
+        # Prepare CSV file for saving results
+        self.results_file = os.path.join(self.results_dir, "subdomain_error_norms.csv")
     
     def solve(self):
         """Solves the Poisson equation on the subdomain using global solution as boundary conditions."""
-        global_msh, global_solution, _, _, _, global_grad = self.global_solver.solve()
+        global_msh, global_solution, _, _, _, global_grad = self.global_solver.solve()  # <-- FIXED UNPACKING
         
         subdomain_size = (self.subdomain_bounds[1] - self.subdomain_bounds[0], 
-                          self.subdomain_bounds[3] - self.subdomain_bounds[2])
+                        self.subdomain_bounds[3] - self.subdomain_bounds[2])
         num_elements = (self.global_solver.num_elements[0] * self.refinement_factor, 
                         self.global_solver.num_elements[1] * self.refinement_factor)
         
@@ -101,38 +104,31 @@ class SubdomainSolver:
         dofs = fem.locate_dofs_topological(V=V, entity_dim=1, entities=facets)
         boundary_coords = msh.geometry.x[dofs]  # Get boundary node coordinates
 
-        # Find the closest cell for each boundary coordinate
-        # Interpolate the global solution onto the boundary
-        V_sub = fem.functionspace(global_msh, ("Lagrange", 1))
-        bc_function = Function(V_sub)
-        # Create a function to store boundary conditions
-        bc_function = Function(V)
-
-        # Use `probe()` to evaluate the global solution at boundary coordinates
-        # Ensure the boundary coordinates are in the correct shape (Nx3)
+        # Ensure the boundary coordinates are in the correct shape (Nx3 for FEniCS)
         boundary_coords_3D = np.column_stack((boundary_coords, np.zeros(boundary_coords.shape[0])))
 
-        # Get closest cells
-        boundary_cells = fem.Function(V)  # Function space on global mesh
-        global_solution.eval(boundary_coords_3D.T, boundary_cells.x.array)
+        # Get closest cells from global mesh
+        boundary_cells = np.array([compute_closest_entity(global_msh, c) for c in boundary_coords_3D])
 
-        # Extract the correct values at boundary DOFs
-        bc_values = boundary_cells.x.array[dofs]
+        # Remove invalid points
+        valid = boundary_cells >= 0
+        boundary_coords_3D = boundary_coords_3D[valid]
+        boundary_cells = boundary_cells[valid]
+
+        # Evaluate the global solution at the valid boundary coordinates
+        bc_values = np.array([global_solution.eval(c.reshape(1, -1), np.array([cell]))[0] 
+                            for c, cell in zip(boundary_coords_3D, boundary_cells)])
         bc = fem.dirichletbc(bc_values, dofs, V)
 
-
+        # Define weak form
         a = inner(grad(u), grad(v)) * dx
-        L = inner(-div(global_grad), v) * dx
-        
+        L = inner(ufl.Constant(0), v) * dx  # No source term for subdomain
+
         problem = LinearProblem(a, L, bcs=[bc], petsc_options={"ksp_type": "preonly", "pc_type": "lu"})
         uh = problem.solve()
-        
-        solution_filename = os.path.join(self.results_dir, f"subdomain_solution_{num_elements[0]}x{num_elements[1]}.xdmf")
-        with io.XDMFFile(MPI.COMM_WORLD, solution_filename, "w") as file:
-            file.write_mesh(msh)
-            file.write_function(uh)
-        
+
         return msh, uh
+
 
 if __name__ == "__main__":
     global_solver = GeneralSolver()
