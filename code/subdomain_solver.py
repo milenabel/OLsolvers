@@ -4,88 +4,54 @@ import numpy as np
 import ufl
 from dolfinx import fem, io, mesh
 from dolfinx.fem.petsc import LinearProblem
-from dolfinx.geometry import BoundingBoxTree, compute_colliding_cells
 from ufl import dx, grad, inner, div
 
+# Ensure the results directory exists
+results_dir_1 = "../results/general"
+os.makedirs(results_dir_1, exist_ok=True)
 
-# Ensure the "results" directory exists
-results_dir = "../results/subdomain"
-os.makedirs(results_dir, exist_ok=True)
+results_dir_2 = "../results/subdomain"
+os.makedirs(results_dir_2, exist_ok=True)
 
-def poisson_solver(domain_size=(12.0, 12.0), num_elements=(12, 12)):
-    """Generalized Poisson solver with error computation and result storage."""
-    # Create mesh
-    msh = mesh.create_rectangle(
-        comm=MPI.COMM_WORLD,
-        points=((0.0, 0.0), domain_size),
-        n=num_elements,
-        cell_type=mesh.CellType.quadrilateral,
-    )
+def read_global_solution(global_mesh_size):
+    """Read global solution from XDMF file and return function."""
+    filename = os.path.join(results_dir_1, f"poisson_solution_{global_mesh_size[0]}x{global_mesh_size[1]}.xdmf")
+
+    # Read mesh
+    with io.XDMFFile(MPI.COMM_WORLD, filename, "r") as file:
+        msh = file.read_mesh(name="mesh")  # Ensure correct mesh name
+        msh.topology.create_connectivity(msh.topology.dim - 1, msh.topology.dim)
+
+    # Create function space
     V = fem.functionspace(msh, ("Lagrange", 1))
+    uh = fem.Function(V)
 
-    # Define problem: Poisson equation -Δu = f
-    u = ufl.TrialFunction(V)
-    v = ufl.TestFunction(V)
-    x = ufl.SpatialCoordinate(msh)
+    # Read function using correct format
+    with io.XDMFFile(MPI.COMM_WORLD, filename, "r") as file:
+        file.read_mesh(msh)  # Ensure mesh is loaded first
+        file.read_function(uh)  # Read function without specifying time step
 
-    # Define exact solution (used for computing f and errors)
-    p_exact_expr = ufl.sin(ufl.pi * x[0] / domain_size[0]) * ufl.sin(ufl.pi * x[1] / domain_size[1])
+    return msh, V, uh
+
+
+def interpolate_global_to_subdomain(global_function, subdomain_bounds):
+    """Interpolate the global function values onto the subdomain boundary."""
+    def global_eval(x):
+        return global_function.eval(x.T).flatten()
     
-    # Compute f(x,y) as -Δ p_exact
-    f = -div(grad(p_exact_expr))
+    return global_eval
 
-    # Interpolate exact solution onto function space
-    p_exact = fem.Function(V)
-    def exact_solution(x):
-        return np.sin(np.pi * x[0] / domain_size[0]) * np.sin(np.pi * x[1] / domain_size[1])
-    p_exact.interpolate(exact_solution)
-
-    # Apply Dirichlet BC to match the exact solution
-    facets = mesh.locate_entities_boundary(
-        msh, dim=msh.topology.dim - 1, marker=lambda x: np.full(x.shape[1], True)  # Apply BCs to all boundaries
-    )
-    dofs = fem.locate_dofs_topological(V=V, entity_dim=1, entities=facets)
-    bc = fem.dirichletbc(p_exact, dofs)  # Use exact solution as BC
-
-    # Define weak form
-    a = inner(grad(u), grad(v)) * dx
-    L = inner(f, v) * dx
-
-    # Solve the problem
-    problem = LinearProblem(a, L, bcs=[bc], petsc_options={"ksp_type": "preonly", "pc_type": "lu"})
-    uh = problem.solve()
-
-    # Compute L2 and H1 error norms
-    error_L2_form = fem.form(inner(uh - p_exact, uh - p_exact) * dx)
-    L2_norm = np.sqrt(msh.comm.allreduce(fem.assemble_scalar(error_L2_form), op=MPI.SUM))
-
-    error_H1_form = fem.form(inner(grad(uh - p_exact), grad(uh - p_exact)) * dx)
-    H1_norm = np.sqrt(msh.comm.allreduce(fem.assemble_scalar(error_H1_form), op=MPI.SUM))
-
-    # Compute relative L2 error norm
-    p_exact_L2_form = fem.form(inner(p_exact, p_exact) * dx)
-    p_exact_L2_norm = np.sqrt(msh.comm.allreduce(fem.assemble_scalar(p_exact_L2_form), op=MPI.SUM))
-
-    relative_L2_error = L2_norm / p_exact_L2_norm
-
-    # Save the solution to XDMF file
-    solution_filename = os.path.join(results_dir, f"poisson_solution_{num_elements[0]}x{num_elements[1]}.xdmf")
-    with io.XDMFFile(MPI.COMM_WORLD, solution_filename, "w") as file:
-        file.write_mesh(msh)
-        file.write_function(uh)
-
-    return msh, uh, L2_norm, H1_norm, relative_L2_error
-
-
-
-def subdomain_solver(global_solution, subdomain_bounds, refinement_factor):
+def subdomain_solver(global_mesh_size, subdomain_bounds, refinement_factor):
     """Solve the Poisson equation on a subdomain using the global solution as a boundary condition."""
-    
-    # Define subdomain mesh
+
+    # Read the global solution
+    global_msh, global_V, global_uh = read_global_solution(global_mesh_size)
+
+    # Define subdomain mesh (refinement_factor times finer than the global mesh)
     domain_size = (subdomain_bounds[1] - subdomain_bounds[0], subdomain_bounds[3] - subdomain_bounds[2])
     num_elements = (refinement_factor * (subdomain_bounds[1] - subdomain_bounds[0]),
                     refinement_factor * (subdomain_bounds[3] - subdomain_bounds[2]))
-    
+
     msh = mesh.create_rectangle(
         comm=MPI.COMM_WORLD,
         points=((subdomain_bounds[0], subdomain_bounds[2]), (subdomain_bounds[1], subdomain_bounds[3])),
@@ -95,43 +61,17 @@ def subdomain_solver(global_solution, subdomain_bounds, refinement_factor):
 
     V = fem.functionspace(msh, ("Lagrange", 1))
 
-    # Define problem
+    # Define problem: Poisson equation -Δu = f
     u = ufl.TrialFunction(V)
     v = ufl.TestFunction(V)
     x = ufl.SpatialCoordinate(msh)
 
-    # Compute forcing function f (same as global problem)
+    # Compute f(x,y) as -Δ p_exact
     f = -div(grad(ufl.sin(ufl.pi * x[0] / domain_size[0]) * ufl.sin(ufl.pi * x[1] / domain_size[1])))
 
-    # Define a function for interpolating the global solution on the subdomain boundary
+    # Interpolate global solution onto the subdomain boundary
     global_solution_on_subdomain = fem.Function(V)
-
-    # Create a bounding box tree for the global mesh
-    tree = BoundingBoxTree(global_solution.function_space.mesh)
-
-    def interpolate_global_solution(x):
-        """Interpolate global solution onto the subdomain."""
-        num_points = x.shape[1]
-        values = np.zeros((1, num_points))  # Ensure shape (1, N)
-
-        # Extend to 3D by padding z with zeros
-        padded_x = np.vstack([x, np.zeros(num_points)])  # Convert (2, N) -> (3, N)
-
-        # Compute colliding cells
-        colliding_cells = compute_colliding_cells(tree, padded_x.T)
-        cell_indices = compute_colliding_cells(global_solution.function_space.mesh, colliding_cells, padded_x.T)
-
-        # Ensure we only evaluate where we have valid cells
-        valid_mask = cell_indices >= 0
-        if np.any(valid_mask):
-            values[:, valid_mask] = global_solution.eval(padded_x[:, valid_mask], cell_indices[valid_mask])
-
-        return values  # Returns a NumPy array (not a tuple)
-
-    # Convert function into an explicit function evaluation before interpolation
-    expr = fem.Expression(lambda x: interpolate_global_solution(x), V.element.interpolation_points())
-    
-    global_solution_on_subdomain.interpolate(expr)
+    global_solution_on_subdomain.interpolate(interpolate_global_to_subdomain(global_uh, subdomain_bounds))
 
     # Identify subdomain boundary facets
     facets = mesh.locate_entities_boundary(msh, dim=msh.topology.dim - 1, marker=lambda x: np.full(x.shape[1], True))
@@ -148,25 +88,21 @@ def subdomain_solver(global_solution, subdomain_bounds, refinement_factor):
     problem = LinearProblem(a, L, bcs=[bc], petsc_options={"ksp_type": "preonly", "pc_type": "lu"})
     uh = problem.solve()
 
-    # Save the solution to XDMF file
-    subdomain_filename = os.path.join(results_dir, f"subdomain_solution_{num_elements[0]}x{num_elements[1]}.xdmf")
-    with io.XDMFFile(MPI.COMM_WORLD, subdomain_filename, "w") as file:
+    # Save the subdomain solution
+    solution_filename = os.path.join(results_dir_2, f"subdomain_solution_{num_elements[0]}x{num_elements[1]}.xdmf")
+    with io.XDMFFile(MPI.COMM_WORLD, solution_filename, "w") as file:
         file.write_mesh(msh)
         file.write_function(uh)
 
-    print(f"Subdomain solution saved to {subdomain_filename}")
+    print(f"Subdomain solution saved to {solution_filename}")
 
     return msh, uh
 
-
 if __name__ == "__main__":
-    # Run global solver
-    global_mesh, global_solution, _, _, _ = poisson_solver(domain_size=(12.0, 12.0), num_elements=(12, 12))
+    global_mesh_size = (12, 12)  # Global mesh size that we previously solved
+    subdomain_bounds = (0, 3, 0, 3)  # Define subdomain bounds (x_min, x_max, y_min, y_max)
+    refinement_factor = 4  # Refine subdomain mesh 4x finer than the global mesh
 
-    # Define subdomain bounds (Example: solving only on the (0,0) to (3,3) subdomain)
-    subdomain_bounds = (0, 3, 0, 3)  # (x_min, x_max, y_min, y_max)
-    
-    # Solve subdomain problem with refinement factor (e.g., 4x finer than global)
-    sub_mesh, sub_solution = subdomain_solver(global_solution, subdomain_bounds, refinement_factor=4)
-
-    print("Subdomain solution computed and stored successfully.")
+    print(f"Running subdomain solver for bounds {subdomain_bounds} with refinement factor {refinement_factor}...")
+    sub_mesh, sub_solution = subdomain_solver(global_mesh_size, subdomain_bounds, refinement_factor)
+    print("Subdomain solution computed successfully.")
