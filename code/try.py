@@ -164,21 +164,26 @@ class SubdomainSolver:
 
         return msh_sub, uh
 
-
-
-
 if __name__ == "__main__":
     mesh_sizes = [(3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (24, 24), (48, 48), (96, 96)]
+    
+    # Generate a fixed set of subdomains
+    num_subdomains = 5  # Define how many subdomains we want
+    np.random.seed(42)  # Fix the seed for reproducibility
+    subdomains = []
+    
+    for _ in range(num_subdomains):
+        x0, y0 = np.random.uniform(0, 6), np.random.uniform(0, 6)
+        x1, y1 = x0 + np.random.uniform(2, 4), y0 + np.random.uniform(2, 4)
+        subdomains.append((x0, x1, y0, y1))
 
+    # Run solver for each mesh size using the same subdomains
     for mesh_size in mesh_sizes:
         print(f"\n Running global solver for mesh size {mesh_size}")
         global_solver = GeneralSolver(num_elements=mesh_size)
 
-        for _ in range(5):  # Run 5 random subdomain tests per mesh size
-            x0, y0 = np.random.uniform(0, 6), np.random.uniform(0, 6)
-            x1, y1 = x0 + np.random.uniform(2, 4), y0 + np.random.uniform(2, 4)
-            subdomain_bounds = (x0, x1, y0, y1)
-
-            print(f"Subdomain {subdomain_bounds}")
+        for subdomain_bounds in subdomains:
+            print(f"Using fixed subdomain {subdomain_bounds}")
             sub_solver = SubdomainSolver(global_solver, subdomain_bounds)
             sub_solver.solve()
+

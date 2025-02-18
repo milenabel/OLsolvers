@@ -6,6 +6,7 @@ from dolfinx import fem, io, mesh
 from dolfinx.fem.petsc import LinearProblem
 from dolfinx.fem import Function, FunctionSpace
 from ufl import dx, grad, inner, div
+import pandas as pd
 
 class GeneralSolver:
     def __init__(self, domain_size=(12.0, 12.0), num_elements=(12, 12), results_dir="../results/general"):
@@ -77,11 +78,13 @@ class SubdomainSolver:
         projected_function.interpolate(eval_global_solution)
         return projected_function
 
+    import pandas as pd  # Make sure pandas is imported
+
     def solve(self):
         """Solves the Poisson equation on a subdomain using interpolated global solution as boundary conditions."""
         global_msh, global_solution = self.global_solver.solve()
 
-        # **🔹 Create a finer subdomain mesh**
+        # Create a finer subdomain mesh
         num_elements = (self.global_solver.num_elements[0] * self.refinement_factor, 
                         self.global_solver.num_elements[1] * self.refinement_factor)
 
@@ -89,7 +92,6 @@ class SubdomainSolver:
             comm=MPI.COMM_WORLD,
             points=((self.subdomain_bounds[0], self.subdomain_bounds[2]), 
                     (self.subdomain_bounds[1], self.subdomain_bounds[3])),
-
             n=num_elements,
             cell_type=mesh.CellType.quadrilateral,
         )
@@ -98,43 +100,63 @@ class SubdomainSolver:
         u = ufl.TrialFunction(V_sub)
         v = ufl.TestFunction(V_sub)
 
-        # **🔹 Interpolate global solution onto the subdomain**
+        # Interpolate global solution onto the subdomain
         projected_solution = self.interpolate_solution(global_solution, V_sub)
 
-        # **🔹 Apply Dirichlet BCs using projected solution**
+        # Apply Dirichlet BCs using projected solution
         facets = mesh.locate_entities_boundary(msh_sub, msh_sub.topology.dim - 1, lambda x: np.full(x.shape[1], True))
         dofs = fem.locate_dofs_topological(V_sub, 1, facets)
         bc = fem.dirichletbc(projected_solution, dofs)
 
-        # **🔹 Weak form with zero source term**
+        # Weak form with zero source term
         dx_sub = ufl.Measure("dx", domain=msh_sub)
-        a = inner(grad(u), grad(v)) * dx_sub  # Use subdomain measure
-        L = inner(fem.Constant(msh_sub, 0.0), v) * dx_sub  # Properly define zero RHS
+        a = inner(grad(u), grad(v)) * dx_sub
+        L = inner(fem.Constant(msh_sub, 0.0), v) * dx_sub
 
         problem = LinearProblem(a, L, bcs=[bc], petsc_options={"ksp_type": "preonly", "pc_type": "lu"})
         uh = problem.solve()
 
-        # **🔹 Compute error norms**
+        # Compute error norms
         error_L2_form = fem.form(inner(uh - projected_solution, uh - projected_solution) * dx_sub)
         L2_norm = np.sqrt(msh_sub.comm.allreduce(fem.assemble_scalar(error_L2_form), op=MPI.SUM))
 
         error_H1_form = fem.form(inner(grad(uh - projected_solution), grad(uh - projected_solution)) * dx_sub)
         H1_norm = np.sqrt(msh_sub.comm.allreduce(fem.assemble_scalar(error_H1_form), op=MPI.SUM))
 
-        # **🔹 Compute relative L2 error norm**
+        # Compute relative L2 error norm
         projected_L2_form = fem.form(inner(projected_solution, projected_solution) * dx_sub)
         projected_L2_norm = np.sqrt(msh_sub.comm.allreduce(fem.assemble_scalar(projected_L2_form), op=MPI.SUM))
 
         relative_L2_error = L2_norm / projected_L2_norm
 
-        # **🔹 Log results to CSV**
+        # Save results with a clean format
         results_filename = os.path.join(self.results_dir, "subdomain_error_norms.csv")
-        with open(results_filename, "a") as f:
-            f.write(f"{self.global_solver.num_elements},{self.subdomain_bounds[0]},{self.subdomain_bounds[1]},{self.subdomain_bounds[2]},{self.subdomain_bounds[3]},{L2_norm},{H1_norm},{relative_L2_error}\n")
+
+        df = pd.DataFrame(
+            [[self.global_solver.num_elements[0], self.global_solver.num_elements[1], 
+            self.subdomain_bounds[0], self.subdomain_bounds[1], 
+            self.subdomain_bounds[2], self.subdomain_bounds[3], 
+            L2_norm, H1_norm, relative_L2_error]],
+            columns=["mesh_x", "mesh_y", "sub_x0", "sub_x1", "sub_y0", "sub_y1", "L2_norm", "H1_norm", "Relative_L2_norm"]
+        )
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(results_filename), exist_ok=True)
+
+        # Check if file exists; write header only if it doesn’t exist
+        write_header = not os.path.exists(results_filename)
+
+        # Write CSV and force flush
+        with open(results_filename, "a", newline="") as f:
+            df.to_csv(f, mode="a", header=write_header, index=False)
+            f.flush()  # Ensure data is written immediately
+            os.fsync(f.fileno())  # Ensure file changes are committed to disk
+        
+        print(f"Data saved: {results_filename}")
 
         print(f"Global mesh {self.global_solver.num_elements}: Subdomain {self.subdomain_bounds} → L2: {L2_norm}, H1: {H1_norm}, Rel L2: {relative_L2_error}")
 
-        # **🔹 Save solution**
+        # Save solution
         solution_filename = os.path.join(self.results_dir, f"subdomain_solution_{self.global_solver.num_elements}_{num_elements[0]}x{num_elements[1]}.xdmf")
         with io.XDMFFile(MPI.COMM_WORLD, solution_filename, "w") as file:
             file.write_mesh(msh_sub)
@@ -142,19 +164,26 @@ class SubdomainSolver:
 
         return msh_sub, uh
 
-
 if __name__ == "__main__":
     mesh_sizes = [(3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (24, 24), (48, 48), (96, 96)]
+    
+    # Generate a fixed set of subdomains
+    num_subdomains = 5  # Define how many subdomains we want
+    np.random.seed(42)  # Fix the seed for reproducibility
+    subdomains = []
+    
+    for _ in range(num_subdomains):
+        x0, y0 = np.random.uniform(0, 6), np.random.uniform(0, 6)
+        x1, y1 = x0 + np.random.uniform(2, 4), y0 + np.random.uniform(2, 4)
+        subdomains.append((x0, x1, y0, y1))
 
+    # Run solver for each mesh size using the same subdomains
     for mesh_size in mesh_sizes:
         print(f"\n Running global solver for mesh size {mesh_size}")
         global_solver = GeneralSolver(num_elements=mesh_size)
 
-        for _ in range(5):  # Run 5 random subdomain tests per mesh size
-            x0, y0 = np.random.uniform(0, 6), np.random.uniform(0, 6)
-            x1, y1 = x0 + np.random.uniform(2, 4), y0 + np.random.uniform(2, 4)
-            subdomain_bounds = (x0, x1, y0, y1)
-
-            print(f"Subdomain {subdomain_bounds}")
+        for subdomain_bounds in subdomains:
+            print(f"Using fixed subdomain {subdomain_bounds}")
             sub_solver = SubdomainSolver(global_solver, subdomain_bounds)
             sub_solver.solve()
+
