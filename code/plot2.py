@@ -1,61 +1,67 @@
 import numpy as np
-import matplotlib.pyplot as plt
 import pandas as pd
+import matplotlib.pyplot as plt
 import os
 
-# Load subdomain results from CSV
-results_filename = "../results/subdomains/subdomain_error_norms.csv"
-df = pd.read_csv(results_filename)
-
-# Compute h values (element size) assuming uniform mesh refinement
-df["h"] = 1 / df["mesh_x"]
-
-# Group by subdomains to maintain consistency across different meshes
-subdomain_groups = df.groupby(["sub_x0", "sub_x1", "sub_y0", "sub_y1"])
-
-# Create figures directory
+# Set directories
 figs_dir = "../figs/subdomains"
+csv_file = "../results/subdomains/subdomain_error_norms.csv"
+
+# Ensure output directory exists
 os.makedirs(figs_dir, exist_ok=True)
 
-### **Plot 1: Relative L2 Norm vs. h (All meshes on one plot, grouped by subdomains)**
-plt.figure(figsize=(10, 7))
+# Read the CSV file
+df = pd.read_csv(csv_file)
 
-for (sub_x0, sub_x1, sub_y0, sub_y1), sub_df in subdomain_groups:
-    label = f"Sub ({sub_x0:.2f}, {sub_x1:.2f}, {sub_y0:.2f}, {sub_y1:.2f})"
-    plt.loglog(sub_df["h"], sub_df["Relative_L2_norm"], marker='o', linestyle='-', label=label)
+# Extract unique global mesh sizes
+global_mesh_sizes = df[['global_mesh_x', 'global_mesh_y']].drop_duplicates().values
+colors = ['b', 'g', 'r', 'c', 'm', 'y', 'k']  # Colors for multiple plots
 
-# Add reference O(h^2) slope
-h_ref = np.array([df["h"].min(), df["h"].max()])
-slope_ref = df["Relative_L2_norm"].max() * (h_ref / df["h"].max())**2
-plt.loglog(h_ref, slope_ref, 'k--', label=r"$O(h^2)$ (Reference Slope)")
+# --- Plot 1: Relative L2 Norm vs. h with O(h^2) Reference ---
+plt.figure(figsize=(8, 6))
 
-plt.xlabel("h (Element Size)")
+for i, (Nx, Ny) in enumerate(global_mesh_sizes):
+    subset = df[(df['global_mesh_x'] == Nx) & (df['global_mesh_y'] == Ny)]
+    h_subdomain = 1 / subset['sub_mesh_x']  # Compute h values for subdomain mesh
+    plt.loglog(h_subdomain, subset['Relative_L2_norm'], marker='o', linestyle='-', color=colors[i % len(colors)],
+               label=f"Global Mesh: {Nx}x{Ny}")
+
+# Add reference line for O(h^2) (quadratic convergence)
+h_ref = np.array([min(h_subdomain), max(h_subdomain)])
+o_h2 = 10 * h_ref**2  # Adjust scaling to fit within the plot range
+o_h1 = 10 * h_ref  # Linear convergence
+plt.loglog(h_ref, o_h2, 'k--', label=r"$O(h^2)$")  # Dashed black line
+plt.loglog(h_ref, o_h1, 'k-.', label=r"$O(h)$")  # Dash-dot black line
+
+plt.xlabel("h (Subdomain Element Size)")
 plt.ylabel("Relative L2 Norm")
-plt.title("Subdomain Convergence: Relative L2 Norm vs. h")
+plt.title("Relative L2 Norm vs. h (Subdomain Solver)")
 plt.grid(True, which="both", linestyle="--")
-plt.legend(fontsize=8, loc="best")
-plt.savefig(os.path.join(figs_dir, "subdomain_relative_L2_vs_h.png"), dpi=300)
+plt.legend()
+plt.savefig(os.path.join(figs_dir, "relative_L2_vs_h_subdomain.png"), dpi=300)
 plt.show()
 
-### **Plot 2: L2 and H1 Norm Convergence vs. h (All meshes on one plot, grouped by subdomains)**
-plt.figure(figsize=(10, 7))
+# --- Plot 2: Convergence of L2 and H1 Norms with O(h^2) and O(h) References ---
+plt.figure(figsize=(8, 6))
 
-for (sub_x0, sub_x1, sub_y0, sub_y1), sub_df in subdomain_groups:
-    label = f"Sub ({sub_x0:.2f}, {sub_x1:.2f}, {sub_y0:.2f}, {sub_y1:.2f})"
-    plt.loglog(sub_df["h"], sub_df["L2_norm"], marker='s', linestyle='-', label=f"{label} (L2)")
-    plt.loglog(sub_df["h"], sub_df["H1_norm"], marker='^', linestyle='-', label=f"{label} (H1)")
+for i, (Nx, Ny) in enumerate(global_mesh_sizes):
+    subset = df[(df['global_mesh_x'] == Nx) & (df['global_mesh_y'] == Ny)]
+    h_subdomain = 1 / subset['sub_mesh_x']
+    plt.loglog(h_subdomain, subset['L2_norm'], marker='s', linestyle='-', color=colors[i % len(colors)],
+               label=f"L2 Norm (Global {Nx}x{Ny})")
+    plt.loglog(h_subdomain, subset['H1_norm'], marker='^', linestyle='--', color=colors[i % len(colors)],
+               label=f"H1 Norm (Global {Nx}x{Ny})")
 
-# Add reference O(h^2) for L2 and O(h) for H1 slopes
-slope_L2_ref = df["L2_norm"].max() * (h_ref / df["h"].max())**2
-slope_H1_ref = df["H1_norm"].max() * (h_ref / df["h"].max())**1
+# Add reference lines for O(h^2) and O(h)
+o_h2 = 10 * h_ref**2  # Quadratic convergence
+o_h1 = 10 * h_ref  # Linear convergence
+plt.loglog(h_ref, o_h2, 'k--', label=r"$O(h^2)$")  # Dashed black line
+plt.loglog(h_ref, o_h1, 'k-.', label=r"$O(h)$")  # Dash-dot black line
 
-plt.loglog(h_ref, slope_L2_ref, 'k--', label=r"$O(h^2)$ (Reference Slope for L2)")
-plt.loglog(h_ref, slope_H1_ref, 'r--', label=r"$O(h)$ (Reference Slope for H1)")
-
-plt.xlabel("h (Element Size)")
+plt.xlabel("h (Subdomain Element Size)")
 plt.ylabel("Error Norms")
-plt.title("Subdomain Convergence: L2 and H1 Norms vs. h")
+plt.title("Convergence Plot: L2 and H1 Norms vs. h (Subdomain Solver)")
 plt.grid(True, which="both", linestyle="--")
-plt.legend(fontsize=8, loc="best")
-plt.savefig(os.path.join(figs_dir, "subdomain_convergence.png"), dpi=300)
+plt.legend()
+plt.savefig(os.path.join(figs_dir, "convergence_subdomain.png"), dpi=300)
 plt.show()
