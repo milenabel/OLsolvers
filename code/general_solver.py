@@ -8,8 +8,6 @@ from ufl import dx, grad, inner, div
 import pandas as pd
 
 class GeneralSolver:
-"""Generalized Poisson solver with error computation and result storage."""
-
     def __init__(self, domain_size=(12.0, 12.0), num_elements=(12, 12), results_dir="../results/general"):
         self.domain_size = domain_size
         self.num_elements = num_elements
@@ -25,53 +23,42 @@ class GeneralSolver:
             cell_type=mesh.CellType.quadrilateral,
         )
         V = fem.functionspace(msh, ("Lagrange", 1))
-    
-        # Define problem: Poisson equation -Δu = f
+
         u = ufl.TrialFunction(V)
         v = ufl.TestFunction(V)
         x = ufl.SpatialCoordinate(msh)
 
-        # Define exact solution (used for computing f and errors)
-        p_exact_expr = ufl.sin(ufl.pi * x[0] / domain_size[0]) * ufl.sin(ufl.pi * x[1] / domain_size[1])
-        
-        # Compute f(x,y) as -Δ p_exact
+        p_exact_expr = ufl.sin(ufl.pi * x[0] / self.domain_size[0]) * ufl.sin(ufl.pi * x[1] / self.domain_size[1])
         f = -div(grad(p_exact_expr))
 
-        # Interpolate exact solution onto function space
         p_exact = fem.Function(V)
         def exact_solution(x):
-            return np.sin(np.pi * x[0] / domain_size[0]) * np.sin(np.pi * x[1] / domain_size[1])
+            return np.sin(np.pi * x[0] / self.domain_size[0]) * np.sin(np.pi * x[1] / self.domain_size[1])
         p_exact.interpolate(exact_solution)
 
-        # Apply Dirichlet BC to match the exact solution
         facets = mesh.locate_entities_boundary(
             msh, dim=msh.topology.dim - 1, marker=lambda x: np.full(x.shape[1], True)
         )
         dofs = fem.locate_dofs_topological(V=V, entity_dim=1, entities=facets)
         bc = fem.dirichletbc(p_exact, dofs)
 
-        # Define weak form
         a = inner(grad(u), grad(v)) * dx
         L = inner(f, v) * dx
 
-        # Solve the problem
         problem = LinearProblem(a, L, bcs=[bc], petsc_options={"ksp_type": "preonly", "pc_type": "lu"})
         uh = problem.solve()
 
-        # Compute L2 and H1 error norms
         error_L2_form = fem.form(inner(uh - p_exact, uh - p_exact) * dx)
         L2_norm = np.sqrt(msh.comm.allreduce(fem.assemble_scalar(error_L2_form), op=MPI.SUM))
 
         error_H1_form = fem.form(inner(grad(uh - p_exact), grad(uh - p_exact)) * dx)
         H1_norm = np.sqrt(msh.comm.allreduce(fem.assemble_scalar(error_H1_form), op=MPI.SUM))
 
-        # Compute relative L2 error norm
         p_exact_L2_form = fem.form(inner(p_exact, p_exact) * dx)
         p_exact_L2_norm = np.sqrt(msh.comm.allreduce(fem.assemble_scalar(p_exact_L2_form), op=MPI.SUM))
 
         relative_L2_error = L2_norm / p_exact_L2_norm
 
-        # Save the solution to XDMF file
         solution_filename = os.path.join(self.results_dir, f"poisson_solution_{self.num_elements[0]}x{self.num_elements[1]}.xdmf")
         with io.XDMFFile(MPI.COMM_WORLD, solution_filename, "w") as file:
             file.write_mesh(msh)
