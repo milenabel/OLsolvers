@@ -11,7 +11,7 @@ from ufl import dx, grad, inner, div
 GENERAL_RESULTS_CSV = "../results/general/poisson_error_norms.csv"
 
 class SubdomainSolver:
-    def __init__(self, global_mesh_size, global_solution_values, subdomain_bounds, num_elements, results_dir="../results/subdomains/8"):
+    def __init__(self, global_mesh_size, global_solution_values, subdomain_bounds, num_elements, results_dir="../results/subdomains"):
         self.global_mesh_size = global_mesh_size  # Store mesh size of the global solver
         self.global_solution_values = global_solution_values  # Store L2, H1, Rel L2 from CSV
         self.subdomain_bounds = subdomain_bounds
@@ -42,9 +42,7 @@ class SubdomainSolver:
 
         # Create a function for Dirichlet boundary conditions
         bc_function = fem.Function(V_sub)
-        # bc_function.interpolate(lambda x: np.full(x.shape[1], L2_norm_global))  # Fill with L2 norm value
-        bc_function.interpolate(lambda x: np.sin(8 * np.pi * x[0]) * np.cos(8 * np.pi * x[1]))
-
+        bc_function.interpolate(lambda x: np.full(x.shape[1], L2_norm_global))  # Fill with L2 norm value
 
         # Apply Dirichlet BCs using the interpolated function
         facets = mesh.locate_entities_boundary(msh_sub, msh_sub.topology.dim - 1, lambda x: np.full(x.shape[1], True))
@@ -60,23 +58,11 @@ class SubdomainSolver:
         uh = problem.solve()
 
         # Compute error norms
-        # error_L2_form = fem.form(inner(uh - bc_function, uh - bc_function) * dx_sub)
-        # L2_norm = np.sqrt(msh_sub.comm.allreduce(fem.assemble_scalar(error_L2_form), op=MPI.SUM))
-
-        # error_H1_form = fem.form(inner(grad(uh - bc_function), grad(uh - bc_function)) * dx_sub)
-        # H1_norm = np.sqrt(msh_sub.comm.allreduce(fem.assemble_scalar(error_H1_form), op=MPI.SUM))
-
-
-        # u_exact = fem.Function(V_sub)
-        # u_exact.interpolate(lambda x: np.sin(8 * np.pi * x[0]) * np.cos(8 * np.pi * x[1]))
-
-        # Compute error norms using u_exact instead of bc_function
         error_L2_form = fem.form(inner(uh - bc_function, uh - bc_function) * dx_sub)
         L2_norm = np.sqrt(msh_sub.comm.allreduce(fem.assemble_scalar(error_L2_form), op=MPI.SUM))
 
         error_H1_form = fem.form(inner(grad(uh - bc_function), grad(uh - bc_function)) * dx_sub)
         H1_norm = np.sqrt(msh_sub.comm.allreduce(fem.assemble_scalar(error_H1_form), op=MPI.SUM))
-
 
         # Compute relative L2 error norm
         projected_L2_form = fem.form(inner(bc_function, bc_function) * dx_sub)

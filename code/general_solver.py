@@ -8,7 +8,7 @@ from ufl import dx, grad, inner, div
 import pandas as pd
 
 class GeneralSolver:
-    def __init__(self, domain_size=(12.0, 12.0), num_elements=(12, 12), results_dir="../results/general/8"):
+    def __init__(self, domain_size=(12.0, 12.0), num_elements=(12, 12), results_dir="../results/general"):
         self.domain_size = domain_size
         self.num_elements = num_elements
         self.results_dir = results_dir
@@ -28,19 +28,12 @@ class GeneralSolver:
         v = ufl.TestFunction(V)
         x = ufl.SpatialCoordinate(msh)
 
-        # p_exact_expr = ufl.sin(ufl.pi * x[0] / self.domain_size[0]) * ufl.sin(ufl.pi * x[1] / self.domain_size[1])
-        # f = -div(grad(p_exact_expr))
-
-        # p_exact = fem.Function(V)
-        # def exact_solution(x):
-        #     return np.sin(np.pi * x[0] / self.domain_size[0]) * np.sin(np.pi * x[1] / self.domain_size[1])
-
-        p_exact_expr = ufl.sin(8 * ufl.pi * x[0] / self.domain_size[0]) * ufl.cos(8 * ufl.pi * x[1] / self.domain_size[1])
+        p_exact_expr = ufl.sin(ufl.pi * x[0] / self.domain_size[0]) * ufl.sin(ufl.pi * x[1] / self.domain_size[1])
         f = -div(grad(p_exact_expr))
 
         p_exact = fem.Function(V)
         def exact_solution(x):
-            return np.sin(8 * np.pi * x[0] / self.domain_size[0]) * np.cos(8 * np.pi * x[1] / self.domain_size[1])
+            return np.sin(np.pi * x[0] / self.domain_size[0]) * np.sin(np.pi * x[1] / self.domain_size[1])
         p_exact.interpolate(exact_solution)
 
         facets = mesh.locate_entities_boundary(
@@ -87,7 +80,7 @@ if __name__ == "__main__":
     mesh_sizes = [(3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (24, 24), (48, 48), (96, 96)]
     results = []
     
-    results_dir = "../results/general/8"
+    results_dir = "../results/general"
     os.makedirs(results_dir, exist_ok=True)
 
     for size in mesh_sizes:
