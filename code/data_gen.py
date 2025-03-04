@@ -6,9 +6,9 @@ from dolfinx import fem, mesh, io
 import json
 
 # Set parameters
-num_samples = 100  # Number of solutions to generate
+num_samples = 1000  # Number of solutions to generate
 n_value = 8  # Frequency factor
-Lx, Ly = 1.0, 1.0  # Domain size
+Lx, Ly = 12.0, 12.0  # Domain size
 Nx, Ny = 20, 20  # Mesh resolution
 
 def generate_sample(sample_idx):
@@ -22,8 +22,8 @@ def generate_sample(sample_idx):
     a_k = key.normal(0, 1, size=n_value)
     
     # Define manufactured solution u_a(x, y)
-    u_expr = sum(a_k[k] * ufl.cos((k+1) * np.pi * ufl.SpatialCoordinate(msh)[0]) *
-                       ufl.sin((k+1) * np.pi * ufl.SpatialCoordinate(msh)[1]) for k in range(n_value))
+    u_expr = sum(a_k[k] * ufl.cos((k+1) * np.pi * ufl.SpatialCoordinate(msh)[0] / Lx) *
+                       ufl.sin((k+1) * np.pi * ufl.SpatialCoordinate(msh)[1] / Ly) for k in range(n_value))
     
     u = fem.Function(V)
     u.interpolate(fem.Expression(u_expr, V.element.interpolation_points()))
@@ -46,7 +46,7 @@ for i in range(num_samples):
     })
 
 # Save dataset to file
-with open("../results/deeponets/1/dataset.json", "w") as f:
+with open("../results/deeponets/1/dataset1000.json", "w") as f:
     json.dump(dataset, f)
 
 print(f"Saved dataset with {num_samples} samples to dataset.json")

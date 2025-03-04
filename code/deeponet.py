@@ -7,17 +7,18 @@ from jax import random
 from sklearn.model_selection import train_test_split
 
 # Load dataset
-with open("../results/deeponets/1/dataset.json", "r") as f:
+with open("../results/deeponets/1/dataset1000.json", "r") as f:
     dataset = json.load(f)
 
 a_samples = jnp.array([sample["a_k"] for sample in dataset])  # Shape (num_samples, 50)
 u_values = jnp.array([sample["u_values"] for sample in dataset])  # Shape (num_samples, grid_size)
 f_values = jnp.array([sample["f_values"] for sample in dataset])  # Shape (num_samples, grid_size)
 
-# ** FIX SHAPE OF INPUTS **
+
 num_samples, grid_size = u_values.shape
-x_grid = jnp.linspace(0, 1, int(jnp.sqrt(grid_size)))  # Assume square grid
-y_grid = jnp.linspace(0, 1, int(jnp.sqrt(grid_size)))
+Lx, Ly = 12.0, 12.0  # Domain size
+x_grid = jnp.linspace(0, Lx, int(jnp.sqrt(grid_size)))  
+y_grid = jnp.linspace(0, Ly, int(jnp.sqrt(grid_size)))
 X, Y = jnp.meshgrid(x_grid, y_grid, indexing="ij")
 X = X.flatten()[:, None]  # Reshape to column vector
 Y = Y.flatten()[:, None]

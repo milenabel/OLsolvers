@@ -77,7 +77,7 @@ class GeneralSolver:
         return msh, uh
 
 if __name__ == "__main__":
-    mesh_sizes = [(3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (24, 24), (48, 48), (96, 96)]
+    mesh_sizes = [(3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (20, 20), (24, 24), (48, 48), (96, 96)]
     results = []
     
     results_dir = "../results/general"
