@@ -6,7 +6,7 @@ figs_dir = "../figs/deeponet_1"
 os.makedirs(figs_dir, exist_ok=True)
 
 # Load the results
-with open("../results/deeponets/1/deeponet_results1000.json", "r") as f:
+with open("../results/deeponets/1/deeponet_results.json", "r") as f:
     training_results = json.load(f)
 
 # Extract epochs and correct L2 error keys
@@ -23,5 +23,5 @@ plt.ylabel("L2 Error")
 plt.title("DeepONet Train vs Test L2 Error Over Training")
 plt.legend()
 plt.grid()
-plt.savefig(os.path.join(figs_dir, "train_vs_test_l2_error_100fs.png")) 
+plt.savefig(os.path.join(figs_dir, "train_vs_test_l2_error_1000fs.png")) 
 plt.show()
