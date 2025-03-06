@@ -45,12 +45,17 @@ x_inputs = jnp.tile(x_inputs[None, :, :], (num_samples, 1, 1))
 print(f"x_inputs shape: {x_inputs.shape}")
 print_memory_usage("After Processing Inputs")
 
-# Split data into training and testing sets
+# Split data into training (80%) and testing sets (20%)
 a_train, a_test, u_train, u_test, x_train, x_test = train_test_split(
     a_samples, u_values, x_inputs, test_size=0.2, random_state=42
 )
 
-print(f"Training samples: {a_train.shape[0]}, Testing samples: {a_test.shape[0]}")
+# Define held-out dataset (10% of total samples) for generalization error
+a_train, a_heldout, u_train, u_heldout, x_train, x_heldout = train_test_split(
+    a_train, u_train, x_train, test_size=0.125, random_state=42
+)
+
+print(f"Training samples: {a_train.shape[0]}, Testing samples: {a_test.shape[0]}, Held-out samples: {a_heldout.shape[0]}")
 print_memory_usage("After Train-Test Split")
 
 # Define DeepONet model
@@ -107,9 +112,10 @@ def train_step(params, opt_state, x, a, true_u):
 
 # **Tracking results efficiently**
 training_results = []
+final_predictions = {}
 
 # Training loop
-num_epochs = 1000
+num_epochs = 100000  # Train for 100k epochs
 batch_size = 16  
 num_batches = len(x_train) // batch_size
 
@@ -134,14 +140,23 @@ for epoch in range(num_epochs):
     L2_error_train = jnp.linalg.norm(u_pred_train - u_train) / jnp.linalg.norm(u_train)
     L2_error_test = jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test)
 
-    # Store results
+    # Store only necessary training results
     training_results.append({
         "epoch": epoch,
         "L2_error_train": float(L2_error_train),
-        "L2_error_test": float(L2_error_test),
+        "L2_error_test": float(L2_error_test)
     })
 
-    # Ensure variable existence before deletion
+    # Save final predictions at the last epoch
+    if epoch == num_epochs - 1:
+        final_predictions = {
+            "u_pred_train": u_pred_train.tolist(),
+            "u_pred_test": u_pred_test.tolist(),
+            "u_true_train": u_train.tolist(),
+            "u_true_test": u_test.tolist()
+        }
+
+    # Print progress every 100 epochs
     if epoch % 100 == 0:
         print_memory_usage(f"Epoch {epoch}")
         print(f"Epoch {epoch}, Loss: {loss:.6f}, L2 Error Train: {L2_error_train:.6f}, L2 Error Test: {L2_error_test:.6f}")
@@ -150,13 +165,25 @@ for epoch in range(num_epochs):
         print(f"  U_true_test (first 5): {u_test.flatten()[:5]}")
         print(f"  U_pred_test (first 5): {u_pred_test.flatten()[:5]}")
 
-    # **Delete variables only after printing to avoid NameError**
+    # Delete variables only after printing to avoid NameError
     del u_pred_train, u_pred_test  
     gc.collect()  # Force garbage collection
 
+# Compute generalization error on the held-out dataset **once**
+u_pred_heldout = model.apply(params, x_heldout, a_heldout)
+L2_error_heldout = jnp.linalg.norm(u_pred_heldout - u_heldout) / jnp.linalg.norm(u_heldout)
+generalization_error = float(L2_error_heldout)
+
 # Save results
+results = {
+    "training_results": training_results,
+    "final_predictions": final_predictions,
+    "generalization_error": generalization_error
+}
+
 with open("../results/deeponets/1/deeponet_results.json", "w") as f:
-    json.dump(training_results, f)
+    json.dump(results, f)
 
 print("Training complete. Results saved to deeponet_results.json")
+print(f"Generalization Error: {generalization_error:.6f}")
 print_memory_usage("After Training")
