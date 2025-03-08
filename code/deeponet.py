@@ -18,11 +18,11 @@ def print_memory_usage(tag=""):
 with open("../results/deeponets/1/dataset1000.json", "r") as f:
     dataset = json.load(f)
 
-# Extract data
-a_samples = jnp.array([sample["a_k"] for sample in dataset], dtype=jnp.float32)  
+# Extract data (Now using 50 basis functions instead of 8)
+a_samples = jnp.array([sample["a_k"][:50] for sample in dataset], dtype=jnp.float32)  
 u_values = jnp.array([sample["u_values"] for sample in dataset], dtype=jnp.float32)  
 
-# Print initial dataset sizes
+# Print dataset info
 print(f"Dataset loaded: {len(dataset)} samples")
 print(f"a_samples shape: {a_samples.shape}, u_values shape: {u_values.shape}")
 print_memory_usage("After Loading Dataset")
@@ -58,7 +58,7 @@ a_train, a_heldout, u_train, u_heldout, x_train, x_heldout = train_test_split(
 print(f"Training samples: {a_train.shape[0]}, Testing samples: {a_test.shape[0]}, Held-out samples: {a_heldout.shape[0]}")
 print_memory_usage("After Train-Test Split")
 
-# Define DeepONet model
+# Define DeepONet model with tanh activation
 class DeepONet(nn.Module):
     trunk_layers: int
     branch_layers: int
@@ -68,15 +68,15 @@ class DeepONet(nn.Module):
     def setup(self):
         self.trunk_net = nn.Sequential([
             nn.Dense(self.hidden_dim),
-            nn.relu,
-            *[nn.Dense(self.hidden_dim), nn.relu] * (self.trunk_layers - 1),
+            nn.tanh,
+            *[nn.Dense(self.hidden_dim), nn.tanh] * (self.trunk_layers - 1),
             nn.Dense(self.output_dim)
         ])
 
         self.branch_net = nn.Sequential([
             nn.Dense(self.hidden_dim),
-            nn.relu,
-            *[nn.Dense(self.hidden_dim), nn.relu] * (self.branch_layers - 1),
+            nn.tanh,
+            *[nn.Dense(self.hidden_dim), nn.tanh] * (self.branch_layers - 1),
             nn.Dense(self.output_dim)
         ])
     
@@ -110,7 +110,7 @@ def train_step(params, opt_state, x, a, true_u):
     params = optax.apply_updates(params, updates)
     return params, opt_state, loss
 
-# **Tracking results efficiently**
+# Tracking results efficiently
 training_results = []
 final_predictions = {}
 
