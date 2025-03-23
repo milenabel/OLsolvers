@@ -118,5 +118,9 @@ class GeneralSolver:
 
 
 if __name__ == "__main__":
-    solver = GeneralSolver(num_elements=(20, 20), num_rhs=100)
-    solver.solve()
+    mesh_sizes = [(3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (20, 20), (24, 24), (48, 48), (96, 96)]
+    for size in mesh_sizes:
+        print(f"\nRunning solver for mesh: {size}")
+        solver = GeneralSolver(num_elements=size, num_rhs=1000)
+        solver.solve()
+

@@ -26,23 +26,22 @@ if solution_type == "manufactured":
     with open(dataset_path, "r") as f:
         dataset = json.load(f)
 elif solution_type == "FEM":
-    fem_files = sorted(glob.glob("../results/general/poisson_dataset_20x20.json"))  # Only 20x20
-    dataset = []
-    for file in fem_files:
-        with open(file, "r") as f:
-            data = json.load(f)
-            dataset.append(data)
+    mesh_size = (20, 20)  # You can loop over or change this manually
+    fem_files = f"../results/general/poisson_dataset_{mesh_size[0]}x{mesh_size[1]}.json"
+    if not os.path.exists(fem_files):
+        raise FileNotFoundError(f"FEM dataset not found: {fem_files}")
+    
+    with open(fem_files, "r") as f:
+        data = json.load(f)
 
-    if not dataset:
-        raise ValueError("No FEM dataset JSON files found for 20x20 grid.")
-    print(f"[FEM Loader] Loaded {len(dataset)} global solutions with 20x20 mesh.")
+    print(f"[FEM Loader] Loaded {len(data['u_values'])} samples with {mesh_size[0]}x{mesh_size[1]} mesh.")
 
 # Extract data
 if solution_type == "FEM":
-    u_values = jnp.array([sample["u_values"] for sample in dataset], dtype=jnp.float32)
-    f_values = jnp.array([sample["f_values"] for sample in dataset], dtype=jnp.float32)
+    u_values = jnp.array(data["u_values"], dtype=jnp.float32)
+    f_values = jnp.array(data["f_values"], dtype=jnp.float32)
     num_samples, grid_size = u_values.shape
-    Lx, Ly = dataset[0]["domain_size"]
+    Lx, Ly = data["domain_size"]
     a_samples = f_values
 
     # Create trunk input grid (same for all samples)
@@ -67,7 +66,7 @@ else:
     x_inputs = jnp.hstack([X, Y])
 
 # Print dataset info
-print(f"Dataset loaded: {len(dataset)} samples from {solution_type} solutions")
+print(f"Dataset loaded: {num_samples} samples from {solution_type} solutions")
 if a_samples is not None:
     print(f"a_samples shape: {a_samples.shape}")
 print(f"u_values shape: {u_values.shape}")
