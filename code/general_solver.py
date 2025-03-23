@@ -1,26 +1,29 @@
 import os
+import json
 from mpi4py import MPI
 import numpy as np
 import ufl
 from dolfinx import fem, io, mesh
-from dolfinx.fem.petsc import LinearProblem
-from ufl import dx, grad, inner, div
+from dolfinx.fem.petsc import assemble_matrix, assemble_vector, apply_lifting, set_bc
+from petsc4py import PETSc
+from ufl import dx, grad, inner
 import pandas as pd
 
+
 class GeneralSolver:
-    def __init__(self, domain_size=(12.0, 12.0), num_elements=(12, 12), results_dir="../results/general"):
+    def __init__(self, domain_size=(12.0, 12.0), num_elements=(20, 20), results_dir="../results/general", num_rhs=100):
         self.domain_size = domain_size
         self.num_elements = num_elements
         self.results_dir = results_dir
+        self.num_rhs = num_rhs
         os.makedirs(self.results_dir, exist_ok=True)
-    
+
     def solve(self):
-        """Solves the Poisson equation and stores results."""
         msh = mesh.create_rectangle(
-            comm=MPI.COMM_WORLD,
-            points=((0.0, 0.0), self.domain_size),
-            n=self.num_elements,
-            cell_type=mesh.CellType.quadrilateral,
+            MPI.COMM_WORLD,
+            [(0.0, 0.0), self.domain_size],
+            self.num_elements,
+            mesh.CellType.quadrilateral
         )
         V = fem.functionspace(msh, ("Lagrange", 1))
 
@@ -28,70 +31,92 @@ class GeneralSolver:
         v = ufl.TestFunction(V)
         x = ufl.SpatialCoordinate(msh)
 
-        p_exact_expr = ufl.sin(ufl.pi * x[0] / self.domain_size[0]) * ufl.sin(ufl.pi * x[1] / self.domain_size[1])
-        f = -div(grad(p_exact_expr))
-
-        p_exact = fem.Function(V)
-        def exact_solution(x):
-            return np.sin(np.pi * x[0] / self.domain_size[0]) * np.sin(np.pi * x[1] / self.domain_size[1])
-        p_exact.interpolate(exact_solution)
-
-        facets = mesh.locate_entities_boundary(
-            msh, dim=msh.topology.dim - 1, marker=lambda x: np.full(x.shape[1], True)
+        # Homogeneous Dirichlet BC
+        zero = fem.Function(V)
+        boundary_facets = mesh.locate_entities_boundary(
+            msh, dim=msh.topology.dim - 1,
+            marker=lambda x: np.full(x.shape[1], True)
         )
-        dofs = fem.locate_dofs_topological(V=V, entity_dim=1, entities=facets)
-        bc = fem.dirichletbc(p_exact, dofs)
+        bc_dofs = fem.locate_dofs_topological(V, msh.topology.dim - 1, boundary_facets)
+        bc = fem.dirichletbc(zero, bc_dofs)
 
-        a = inner(grad(u), grad(v)) * dx
-        L = inner(f, v) * dx
+        # Assemble matrix
+        a_form = fem.form(inner(grad(u), grad(v)) * dx)
+        A = fem.petsc.assemble_matrix(a_form, bcs=[bc])
+        A.assemble()
 
-        problem = LinearProblem(a, L, bcs=[bc], petsc_options={"ksp_type": "preonly", "pc_type": "lu"})
-        uh = problem.solve()
+        # Create KSP solver once
+        solver = PETSc.KSP().create(MPI.COMM_WORLD)
+        solver.setOperators(A)
+        solver.setType("preonly")
+        solver.getPC().setType("lu")
+        solver.setFromOptions()
 
-        error_L2_form = fem.form(inner(uh - p_exact, uh - p_exact) * dx)
-        L2_norm = np.sqrt(msh.comm.allreduce(fem.assemble_scalar(error_L2_form), op=MPI.SUM))
+        f_array = []
+        u_array = []
+        error_metrics = []
 
-        error_H1_form = fem.form(inner(grad(uh - p_exact), grad(uh - p_exact)) * dx)
-        H1_norm = np.sqrt(msh.comm.allreduce(fem.assemble_scalar(error_H1_form), op=MPI.SUM))
+        for i in range(self.num_rhs):
+            # Randomized RHS
+            coeff_x = np.random.uniform(1, 5)
+            coeff_y = np.random.uniform(1, 5)
+            f_expr = ufl.sin(coeff_x * ufl.pi * x[0] / self.domain_size[0]) * ufl.sin(coeff_y * ufl.pi * x[1] / self.domain_size[1])
+            
+            f_func = fem.Function(V)
+            f_func.interpolate(lambda x_: np.sin(coeff_x * np.pi * x_[0] / self.domain_size[0]) * 
+                                        np.sin(coeff_y * np.pi * x_[1] / self.domain_size[1]))
 
-        p_exact_L2_form = fem.form(inner(p_exact, p_exact) * dx)
-        p_exact_L2_norm = np.sqrt(msh.comm.allreduce(fem.assemble_scalar(p_exact_L2_form), op=MPI.SUM))
+            # Assemble RHS
+            L_form = fem.form(inner(f_func, v) * dx)
+            b = fem.petsc.assemble_vector(L_form)
+            fem.petsc.apply_lifting(b, [a_form], bcs=[[bc]])
+            b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+            fem.petsc.set_bc(b, [bc])
 
-        relative_L2_error = L2_norm / p_exact_L2_norm
+            # Solve
+            u_sol = fem.Function(V)
+            x = A.createVecRight()
+            solver.solve(b, x)
+            u_sol.x.array[:] = x.array
 
-        solution_filename = os.path.join(self.results_dir, f"poisson_solution_{self.num_elements[0]}x{self.num_elements[1]}.xdmf")
-        with io.XDMFFile(MPI.COMM_WORLD, solution_filename, "w") as file:
-            file.write_mesh(msh)
-            file.write_function(uh)
-        
-        return msh, uh, L2_norm, H1_norm, relative_L2_error
-    
-    def load_solution(self):
-        """Loads the saved global solution from an XDMF file."""
-        solution_filename = os.path.join(self.results_dir, f"poisson_solution_{self.num_elements[0]}x{self.num_elements[1]}.xdmf")
-        with io.XDMFFile(MPI.COMM_WORLD, solution_filename, "r") as file:
-            msh = file.read_mesh()
-            V = fem.functionspace(msh, ("Lagrange", 1))
-            uh = fem.Function(V)
-            file.read_function(uh)
-        return msh, uh
+
+
+            # Store results
+            f_array.append(f_func.x.array.copy())
+            u_array.append(u_sol.x.array.copy())
+
+            # For relative error: compare with f_func as "exact" (not really, but good enough)
+            u_exact = fem.Function(V)
+            u_exact.interpolate(lambda x_: np.sin(coeff_x * np.pi * x_[0] / self.domain_size[0]) * 
+                                            np.sin(coeff_y * np.pi * x_[1] / self.domain_size[1]))
+
+            l2_norm = np.sqrt(msh.comm.allreduce(fem.assemble_scalar(fem.form(inner(u_sol, u_sol) * dx)), op=MPI.SUM))
+            l2_error = np.sqrt(msh.comm.allreduce(fem.assemble_scalar(fem.form(inner(u_sol - u_exact, u_sol - u_exact) * dx)), op=MPI.SUM))
+            h1_error = np.sqrt(msh.comm.allreduce(fem.assemble_scalar(fem.form(inner(grad(u_sol - u_exact), grad(u_sol - u_exact)) * dx)), op=MPI.SUM))
+            relative_error = l2_error / l2_norm if l2_norm > 0 else 0.0
+
+            error_metrics.append([i, l2_error, h1_error, relative_error])
+
+        # Save dataset JSON
+        dataset = {
+            "mesh_size": self.num_elements,
+            "domain_size": self.domain_size,
+            "u_values": [u.tolist() for u in u_array],  # Convert each np.ndarray to list
+            "f_values": [f.tolist() for f in f_array]
+        }
+
+        dataset_filename = os.path.join(self.results_dir, f"poisson_dataset_{self.num_elements[0]}x{self.num_elements[1]}.json")
+        with open(dataset_filename, "w") as f:
+            json.dump(dataset, f)
+        print(f"[Saved] Dataset with {self.num_rhs} RHS -> {dataset_filename}")
+
+        # Save CSV error file
+        error_df = pd.DataFrame(error_metrics, columns=["Sample", "L2 Error", "H1 Error", "Relative L2 Error"])
+        error_csv = os.path.join(self.results_dir, f"poisson_error_norms_{self.num_elements[0]}x{self.num_elements[1]}.csv")
+        error_df.to_csv(error_csv, index=False)
+        print(f"[Saved] Error metrics -> {error_csv}")
+
 
 if __name__ == "__main__":
-    mesh_sizes = [(3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (20, 20), (24, 24), (48, 48), (96, 96)]
-    results = []
-    
-    results_dir = "../results/general"
-    os.makedirs(results_dir, exist_ok=True)
-
-    for size in mesh_sizes:
-        solver = GeneralSolver(num_elements=size)
-        print(f"Running solver for mesh size: {size}")
-        _, _, L2_norm, H1_norm, relative_L2_error = solver.solve()
-        print(f"Mesh {size}: L2 norm = {L2_norm}, H1 norm = {H1_norm}, Relative L2 norm = {relative_L2_error}\n")
-
-        results.append([size[0], size[1], L2_norm, H1_norm, relative_L2_error])
-    
-    results_filename = os.path.join(results_dir, "poisson_error_norms.csv")
-    df = pd.DataFrame(results, columns=["Nx", "Ny", "L2 Norm", "H1 Norm", "Relative L2 Norm"])
-    df.to_csv(results_filename, index=False)
-    print(f"Results saved to {results_filename}")
+    solver = GeneralSolver(num_elements=(20, 20), num_rhs=100)
+    solver.solve()

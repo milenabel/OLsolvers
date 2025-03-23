@@ -9,21 +9,26 @@ import psutil
 from jax import random
 from sklearn.model_selection import train_test_split
 
+# Choose between "manufactured" and "FEM"
+solution_type = "manufactured"  # Change to "FEM" when needed
+
 # Function to check memory usage
 def print_memory_usage(tag=""):
     process = psutil.Process(os.getpid())
     print(f"[{tag}] Memory Usage: {process.memory_info().rss / 1e6:.2f} MB")
 
-# Load dataset
-with open("../results/deeponets/1/dataset1000.json", "r") as f:
+# Load dataset based on solution type
+dataset_path = f"../results/deeponets/1/dataset1000_{solution_type}.json"
+
+with open(dataset_path, "r") as f:
     dataset = json.load(f)
 
-# Extract data (Now using 50 basis functions instead of 8)
+# Extract data (50 basis functions)
 a_samples = jnp.array([sample["a_k"][:50] for sample in dataset], dtype=jnp.float32)  
 u_values = jnp.array([sample["u_values"] for sample in dataset], dtype=jnp.float32)  
 
 # Print dataset info
-print(f"Dataset loaded: {len(dataset)} samples")
+print(f"Dataset loaded: {len(dataset)} samples from {solution_type} solutions")
 print(f"a_samples shape: {a_samples.shape}, u_values shape: {u_values.shape}")
 print_memory_usage("After Loading Dataset")
 
@@ -160,10 +165,6 @@ for epoch in range(num_epochs):
     if epoch % 100 == 0:
         print_memory_usage(f"Epoch {epoch}")
         print(f"Epoch {epoch}, Loss: {loss:.6f}, L2 Error Train: {L2_error_train:.6f}, L2 Error Test: {L2_error_test:.6f}")
-        print(f"  U_true_train (first 5): {u_train.flatten()[:5]}")
-        print(f"  U_pred_train (first 5): {u_pred_train.flatten()[:5]}")
-        print(f"  U_true_test (first 5): {u_test.flatten()[:5]}")
-        print(f"  U_pred_test (first 5): {u_pred_test.flatten()[:5]}")
 
     # Delete variables only after printing to avoid NameError
     del u_pred_train, u_pred_test  
@@ -181,9 +182,9 @@ results = {
     "generalization_error": generalization_error
 }
 
-with open("../results/deeponets/1/deeponet_results.json", "w") as f:
+with open(f"../results/deeponets/1/deeponet_results_{solution_type}.json", "w") as f:
     json.dump(results, f)
 
-print("Training complete. Results saved to deeponet_results.json")
+print(f"Training complete using {solution_type} solutions.")
 print(f"Generalization Error: {generalization_error:.6f}")
 print_memory_usage("After Training")

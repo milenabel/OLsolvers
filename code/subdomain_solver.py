@@ -100,6 +100,36 @@ class SubdomainSolver:
 
             # Debug print after writing
             print(f"Successfully wrote to {results_filename}")
+        
+        # Evaluate solution on mesh vertices
+        subdomain_coords = msh_sub.geometry.x  # Shape: (num_points, 2)
+        uh_vals = uh.x.array  # Convert to NumPy array
+
+        # Save the solution and mesh metadata (only rank 0)
+        if rank == 0:
+            data = {
+                "global_mesh_x": int(self.global_mesh_size[0]),
+                "global_mesh_y": int(self.global_mesh_size[1]),
+                "sub_x0": float(self.subdomain_bounds[0]),
+                "sub_x1": float(self.subdomain_bounds[1]),
+                "sub_y0": float(self.subdomain_bounds[2]),
+                "sub_y1": float(self.subdomain_bounds[3]),
+                "sub_mesh_x": int(self.num_elements[0]),
+                "sub_mesh_y": int(self.num_elements[1]),
+                "L2_norm": float(L2_norm),
+                "H1_norm": float(H1_norm),
+                "Relative_L2_norm": float(relative_L2_error),
+                "coords": subdomain_coords.tolist(),  # Mesh vertex coords
+                "u_values": uh_vals.tolist()          # DoF values at those points
+            }
+
+            # Save as JSON for easier loading into DeepONet
+            json_filename = f"{self.results_dir}/fem_subdomain_g{self.global_mesh_size[0]}x{self.global_mesh_size[1]}_s{self.num_elements[0]}x{self.num_elements[1]}.json"
+            with open(json_filename, "w") as f:
+                import json
+                json.dump(data, f)
+
+            print(f"Saved subdomain solution to: {json_filename}")
 
         return msh_sub, uh
 
