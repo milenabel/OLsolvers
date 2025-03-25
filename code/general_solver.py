@@ -58,13 +58,12 @@ class GeneralSolver:
 
         for i in range(self.num_rhs):
             # Randomized RHS
-            coeff_x = np.random.uniform(1, 5)
-            coeff_y = np.random.uniform(1, 5)
-            f_expr = ufl.sin(coeff_x * ufl.pi * x[0] / self.domain_size[0]) * ufl.sin(coeff_y * ufl.pi * x[1] / self.domain_size[1])
+            u_expr = sum(a_k[k] * ufl.cos((k+1) * np.pi * x[0] / self.domain_size[0]) *
+                                  ufl.sin((k+1) * np.pi * x[1] / self.domain_size[1]) for k in range(len(a_k)))
+            f_expr = -ufl.div(ufl.grad(u_expr))
             
             f_func = fem.Function(V)
-            f_func.interpolate(lambda x_: np.sin(coeff_x * np.pi * x_[0] / self.domain_size[0]) * 
-                                        np.sin(coeff_y * np.pi * x_[1] / self.domain_size[1]))
+            f_func.interpolate(fem.Expression(f_expr, V.element.interpolation_points()))
 
             # Assemble RHS
             L_form = fem.form(inner(f_func, v) * dx)
@@ -76,8 +75,8 @@ class GeneralSolver:
             # Solve
             u_sol = fem.Function(V)
             x = A.createVecRight()
-            solver.solve(b, x)
-            u_sol.x.array[:] = x.array
+            solver.solve(b, x_vec)
+            u_sol.x.array[:] = x_vec.array
 
 
 

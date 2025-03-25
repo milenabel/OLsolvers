@@ -14,17 +14,31 @@ plot_filename = os.path.join(figs_dir, f"train_vs_test_l2_error_{mesh_size[0]}x{
 
 # Load results
 with open(results_filename, "r") as f:
-    training_results = json.load(f)
+    results = json.load(f)
+
+training_results = results["training_results"]
 
 # Extract training info
 epochs = [entry["epoch"] for entry in training_results]
 train_l2_errors = [entry["L2_error_train"] for entry in training_results]
 test_l2_errors = [entry["L2_error_test"] for entry in training_results]
 
-# Plot L2 Errors Over Epochs
+# Optional: Extract generalization errors from the last epoch (or average them)
+last_entry = training_results[-1]
+gen_error_fem = last_entry.get("generalization_error_fem", None)
+gen_error_true = last_entry.get("generalization_error_true", None)
+
+# Plot
 plt.figure(figsize=(8, 6))
 plt.plot(epochs, train_l2_errors, marker="o", linestyle="-", markersize=3, label="Train L2 Error", color="blue")
 plt.plot(epochs, test_l2_errors, marker="s", linestyle="--", markersize=3, label="Test L2 Error", color="red")
+
+# Horizontal lines for generalization errors
+if gen_error_fem is not None:
+    plt.axhline(y=gen_error_fem, color="green", linestyle=":", label=f"Gen Error (FEM): {gen_error_fem:.4f}")
+if gen_error_true is not None:
+    plt.axhline(y=gen_error_true, color="purple", linestyle="--", label=f"Gen Error (True): {gen_error_true:.4f}")
+
 plt.xlabel("Epochs")
 plt.ylabel("L2 Error")
 plt.title(f"DeepONet Train vs Test L2 Error ({mesh_size[0]}x{mesh_size[1]} mesh)")
