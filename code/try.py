@@ -23,7 +23,7 @@ def print_memory_usage(tag=""):
 
 # Define mesh sizes to run over
 # mesh_sizes = [(20, 20), (24, 24), (48, 48), (96, 96)]
-mesh_sizes = [(48, 48), (96, 96)]
+mesh_sizes = [(96, 96)]
 
 for mesh_size in mesh_sizes:
     training_results = []
