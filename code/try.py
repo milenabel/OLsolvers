@@ -11,6 +11,8 @@ from jax import random
 from sklearn.model_selection import train_test_split
 import pandas as pd
 import glob
+import random as pyrandom
+import time
 
 # Choose between "manufactured" and "FEM"
 solution_type = "FEM"  
@@ -22,8 +24,8 @@ def print_memory_usage(tag=""):
 
 
 # Define mesh sizes to run over
-# mesh_sizes = [(20, 20), (24, 24), (48, 48), (96, 96)]
-mesh_sizes = [(96, 96)]
+mesh_sizes = [(20, 20), (24, 24), (48, 48), (96, 96)]
+# mesh_sizes = [(96, 96)]
 
 for mesh_size in mesh_sizes:
     training_results = []
@@ -148,10 +150,16 @@ for mesh_size in mesh_sizes:
 
     # Initialize model
     model = DeepONet(trunk_layers=3, branch_layers=3, hidden_dim=64, output_dim=grid_size)
-    key = random.PRNGKey(0)
+    # key = random.PRNGKey(0)
+
+    seed = 42
+    np.random.seed(seed)
+    pyrandom.seed(seed)
+    key = jax.random.PRNGKey(seed)
+
 
     print_memory_usage("Before Model Initialization")
-    params = model.init(key, x_train[0:1], a_train[0:1] if a_train is not None else x_train[0:1])
+    params = model.init(key, x_train[0:1], a_train[0:1])
     print_memory_usage("After Model Initialization")
 
     # Loss function
@@ -177,7 +185,22 @@ for mesh_size in mesh_sizes:
 
     # Training loop
     num_epochs = 100000  # Train for 100k epochs
-    batch_size = 16  
+
+    # Choose batch size based on grid size
+    # if grid_size <= 500:
+    #     batch_size = 16
+    # elif grid_size <= 2500:
+    #     batch_size = 8
+    # else:
+    #     batch_size = 2
+
+    if grid_size <= 500:
+        batch_size = 64
+    elif grid_size <= 2500:
+        batch_size = 32
+    else:
+        batch_size = 8
+
     if solution_type == "manufactured":
         num_batches = len(x_train) // batch_size
     else:
@@ -186,6 +209,7 @@ for mesh_size in mesh_sizes:
     print_memory_usage("Before Training Loop")
 
     for epoch in range(num_epochs):
+        epoch_start = time.time()
         loss = 0.0  # Initialize loss for this epoch
         for batch in range(num_batches):
             start_idx = batch * batch_size
@@ -198,51 +222,56 @@ for mesh_size in mesh_sizes:
             params, opt_state, loss = train_step(params, opt_state, x_batch, a_batch, u_batch)
 
         # Compute predictions
+        @jax.jit
+        def predict_fn(params, x, a):
+            return model.apply(params, x, a)
+
         def predict_in_batches(x, a, batch_size=16):
             preds = []
             for i in range(0, len(x), batch_size):
                 x_batch = x[i:i+batch_size]
                 a_batch = a[i:i+batch_size] if a is not None else None
-                pred = model.apply(params, x_batch, a_batch)
+                pred = predict_fn(params, x_batch, a_batch)
                 preds.append(pred)
             return jnp.concatenate(preds, axis=0)
 
-        u_pred_train = predict_in_batches(x_train, a_train)
-        u_pred_test = predict_in_batches(x_test, a_test)
-        u_pred_heldout = predict_in_batches(x_heldout, a_heldout)
-
-        # Compute L2 errors
-        L2_error_train = jnp.linalg.norm(u_pred_train - u_train) / jnp.linalg.norm(u_train)
-        L2_error_test = jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test)
-
-        # Compute generalization error on held-out data
-        L2_error_heldout = jnp.linalg.norm(u_pred_heldout - u_heldout) / jnp.linalg.norm(u_heldout)
-        if solution_type == "manufactured":
-            generalization_error = float(L2_error_heldout)
-
-            # Store results
-            training_results.append({
-                "epoch": epoch,
-                "L2_error_train": float(L2_error_train),
-                "L2_error_test": float(L2_error_test),
-                "generalization_error": generalization_error
-            })
-        elif solution_type == "FEM":
-            # Compute true generalization error vs manufactured solution
-            generalization_error_fem = float(jnp.linalg.norm(u_pred_heldout - u_heldout) / jnp.linalg.norm(u_heldout))
-            generalization_error_true = float(jnp.linalg.norm(u_pred_heldout - u_exact_heldout) / jnp.linalg.norm(u_exact_heldout))
-
-            training_results.append({
-                "epoch": epoch,
-                "L2_error_train": float(L2_error_train),
-                "L2_error_test": float(L2_error_test),
-                "generalization_error_fem": generalization_error_fem,
-                "generalization_error_true": generalization_error_true
-            })
-
         if epoch % 100 == 0:
+            u_pred_train = predict_in_batches(x_train, a_train)
+            u_pred_test = predict_in_batches(x_test, a_test)
+            u_pred_heldout = predict_in_batches(x_heldout, a_heldout)
+
+            # Compute L2 errors
+            L2_error_train = jnp.linalg.norm(u_pred_train - u_train) / jnp.linalg.norm(u_train)
+            L2_error_test = jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test)
+
+            # Compute generalization error on held-out data
+            L2_error_heldout = jnp.linalg.norm(u_pred_heldout - u_heldout) / jnp.linalg.norm(u_heldout)
+            if solution_type == "manufactured":
+                generalization_error = float(L2_error_heldout)
+
+                # Store results
+                training_results.append({
+                    "epoch": epoch,
+                    "L2_error_train": float(L2_error_train),
+                    "L2_error_test": float(L2_error_test),
+                    "generalization_error": generalization_error
+                })
+            elif solution_type == "FEM":
+                # Compute true generalization error vs manufactured solution
+                generalization_error_fem = float(jnp.linalg.norm(u_pred_heldout - u_heldout) / jnp.linalg.norm(u_heldout))
+                generalization_error_true = float(jnp.linalg.norm(u_pred_heldout - u_exact_heldout) / jnp.linalg.norm(u_exact_heldout))
+
+                training_results.append({
+                    "epoch": epoch,
+                    "L2_error_train": float(L2_error_train),
+                    "L2_error_test": float(L2_error_test),
+                    "generalization_error_fem": generalization_error_fem,
+                    "generalization_error_true": generalization_error_true
+                })
+
             print_memory_usage(f"Epoch {epoch}")
             print(f"Epoch {epoch}, Loss: {loss:.6f}, L2 Error Train: {L2_error_train:.6f}, L2 Error Test: {L2_error_test:.6f}")
+            print(f"Epoch time: {time.time() - epoch_start:.2f}s")
 
     # Save results
     results_filename = f"../results/deeponets/2/deeponet_results_{solution_type}_{mesh_size[0]}x{mesh_size[1]}.json"
