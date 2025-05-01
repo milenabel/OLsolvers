@@ -1,0 +1,42 @@
+
+=== Running DeepONet for mesh 20x20 (FEM) ===
+[After Loading Dataset] Memory Usage: 293.74 MB
+Mesh (20, 20), FEM:   0%|          | 0/100000 [00:00<?, ?it/s]Mesh (20, 20), FEM:   0%|          | 0/100000 [00:12<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/mio_rain/Documents/Milena/OLsolvers/code/train_deeponet_taylor.py", line 115, in <module>
+    params, opt_state, loss = train_step(params, opt_state, x_batch, a_batch, u_batch)
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mio_rain/miniconda3/lib/python3.12/site-packages/jax/_src/traceback_util.py", line 182, in reraise_with_filtered_traceback
+    return fun(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/mio_rain/miniconda3/lib/python3.12/site-packages/jax/_src/pjit.py", line 340, in cache_miss
+    pgle_profiler) = _python_pjit_helper(fun, jit_info, *args, **kwargs)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mio_rain/miniconda3/lib/python3.12/site-packages/jax/_src/pjit.py", line 191, in _python_pjit_helper
+    out_flat, compiled, profiler = _pjit_call_impl_python(*args_flat, **p.params)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mio_rain/miniconda3/lib/python3.12/site-packages/jax/_src/pjit.py", line 1809, in _pjit_call_impl_python
+    ).compile()
+      ^^^^^^^^^
+  File "/home/mio_rain/miniconda3/lib/python3.12/site-packages/jax/_src/interpreters/pxla.py", line 2462, in compile
+    executable = UnloadedMeshExecutable.from_hlo(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mio_rain/miniconda3/lib/python3.12/site-packages/jax/_src/interpreters/pxla.py", line 3004, in from_hlo
+    xla_executable = _cached_compilation(
+                     ^^^^^^^^^^^^^^^^^^^^
+  File "/home/mio_rain/miniconda3/lib/python3.12/site-packages/jax/_src/interpreters/pxla.py", line 2795, in _cached_compilation
+    xla_executable = compiler.compile_or_get_cached(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mio_rain/miniconda3/lib/python3.12/site-packages/jax/_src/compiler.py", line 432, in compile_or_get_cached
+    return _compile_and_write_cache(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mio_rain/miniconda3/lib/python3.12/site-packages/jax/_src/compiler.py", line 694, in _compile_and_write_cache
+    executable = backend_compile(
+                 ^^^^^^^^^^^^^^^^
+  File "/home/mio_rain/miniconda3/lib/python3.12/site-packages/jax/_src/profiler.py", line 334, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mio_rain/miniconda3/lib/python3.12/site-packages/jax/_src/compiler.py", line 324, in backend_compile
+    return backend.compile(built_c, compile_options=options)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

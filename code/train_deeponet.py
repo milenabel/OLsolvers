@@ -1,0 +1,264 @@
+import jax
+import numpy as np
+import jax.numpy as jnp
+import optax
+import flax.linen as nn
+import json
+import os
+import gc  # Garbage collection
+import psutil
+from jax import random
+from sklearn.model_selection import train_test_split
+from deeponet import DeepONet
+from tqdm import trange
+import pandas as pd
+import glob
+import random as pyrandom
+import time
+
+# Choose between "manufactured" and "FEM"
+solution_type = "manufactured"  
+
+# Function to check memory usage
+def print_memory_usage(tag=""):
+    process = psutil.Process(os.getpid())
+    print(f"[{tag}] Memory Usage: {process.memory_info().rss / 1e6:.2f} MB")
+
+
+# Define mesh sizes to run over
+mesh_sizes = [(20, 20), (24, 24), (48, 48), (96, 96)]
+# mesh_sizes = [(96, 96)]
+
+for mesh_size in mesh_sizes:
+    training_results = []
+
+    print(f"\n=== Running DeepONet for mesh {mesh_size[0]}x{mesh_size[1]} ({solution_type}) ===")
+
+    if solution_type == "manufactured":
+        dataset_path = f"../results/manufactured/{mesh_size[0]}x{mesh_size[1]}/dataset_{mesh_size[0]}x{mesh_size[1]}.json"
+        with open(dataset_path, "r") as f:
+            dataset = json.load(f)
+
+        u_values = jnp.array([sample["u_values"] for sample in dataset], dtype=jnp.float32)
+        a_samples = jnp.array([sample["a_k"] for sample in dataset], dtype=jnp.float32)
+        num_samples, grid_size = u_values.shape
+
+        # Manufactured data domain is assumed to be [0, 1] x [0, 1]
+        Lx, Ly = 12.0, 12.0
+
+        x_grid = jnp.linspace(0, Lx, int(np.sqrt(grid_size)), dtype=jnp.float32)
+        y_grid = jnp.linspace(0, Ly, int(np.sqrt(grid_size)), dtype=jnp.float32)
+        X, Y = jnp.meshgrid(x_grid, y_grid, indexing="ij")
+        x_inputs = jnp.hstack([X.flatten()[:, None], Y.flatten()[:, None]])
+        x_inputs = jnp.tile(x_inputs[None, :, :], (num_samples, 1, 1))
+
+
+    elif solution_type == "FEM":
+        fem_path = f"../results/general/poisson_dataset_{mesh_size[0]}x{mesh_size[1]}.json"
+        with open(fem_path, "r") as f:
+            data = json.load(f)
+
+        u_values = jnp.array(data["u_values"], dtype=jnp.float32)
+        f_values = jnp.array(data["f_values"], dtype=jnp.float32)
+        num_samples, grid_size = u_values.shape
+        Lx, Ly = data["domain_size"]
+        a_samples = f_values
+
+        x_grid = jnp.linspace(0, Lx, int(np.sqrt(grid_size)), dtype=jnp.float32)
+        y_grid = jnp.linspace(0, Ly, int(np.sqrt(grid_size)), dtype=jnp.float32)
+        X, Y = jnp.meshgrid(x_grid, y_grid, indexing="ij")
+        x_inputs = jnp.hstack([X.flatten()[:, None], Y.flatten()[:, None]])
+        x_inputs = jnp.tile(x_inputs[None, :, :], (num_samples, 1, 1))
+
+        # Load matching manufactured u_exact for true generalization error
+        manu_path = f"../results/manufactured/{mesh_size[0]}x{mesh_size[1]}/dataset_{mesh_size[0]}x{mesh_size[1]}.json"
+        with open(manu_path, "r") as f:
+            manufactured_data = json.load(f)
+        u_exact_all = jnp.array([sample["u_values"] for sample in manufactured_data], dtype=jnp.float32)
+
+        # Overwrite a_samples with the same RHS as in manufactured data
+        a_samples = jnp.array([sample["a_k"] for sample in manufactured_data], dtype=jnp.float32)
+
+        # Split u_exact_all the same way as a_samples (to get u_exact_heldout)
+        _, _, u_exact_train, u_exact_heldout = train_test_split(
+            a_samples, u_exact_all, test_size=0.2, random_state=42
+        )
+        _, u_exact_heldout = train_test_split(
+            u_exact_train, test_size=0.125, random_state=42
+        )
+
+
+    # Print dataset info
+    print(f"Dataset loaded: {num_samples} samples from {solution_type} solutions")
+    if a_samples is not None:
+        print(f"a_samples shape: {a_samples.shape}")
+    print(f"u_values shape: {u_values.shape}")
+    print_memory_usage("After Loading Dataset")
+    print(f"x_inputs shape: {x_inputs.shape}, u_values shape: {u_values.shape}")
+    print_memory_usage("After Processing Inputs")    
+
+
+    # Split data into training (80%) and testing sets (20%)
+    if a_samples is not None:
+        a_train, a_test, u_train, u_test, x_train, x_test = train_test_split(
+            a_samples, u_values, x_inputs, test_size=0.2, random_state=42
+        )
+    else:
+        u_train, u_test, x_train, x_test = train_test_split(
+            u_values, x_inputs, test_size=0.2, random_state=42
+        )
+        a_train = a_test = None
+
+    # Define held-out dataset (10% of total samples) for generalization error
+    if a_samples is not None:
+        a_train, a_heldout, u_train, u_heldout, x_train, x_heldout = train_test_split(
+            a_train, u_train, x_train, test_size=0.125, random_state=42
+        )
+    else:
+        u_train, u_heldout, x_train, x_heldout = train_test_split(
+            u_train, x_train, test_size=0.125, random_state=42
+        )
+        a_heldout = None
+
+    print(f"Training samples: {u_train.shape[0]}, Testing samples: {u_test.shape[0]}, Held-out samples: {u_heldout.shape[0]}")
+    print_memory_usage("After Train-Test Split")
+
+    # Initialize model
+    model = DeepONet(trunk_layers=3, branch_layers=3, hidden_dim=64, output_dim=grid_size)
+    # key = random.PRNGKey(0)
+
+    seed = 42
+    np.random.seed(seed)
+    pyrandom.seed(seed)
+    key = jax.random.PRNGKey(seed)
+
+
+    print_memory_usage("Before Model Initialization")
+    params = model.init(key, x_train[0:1], a_train[0:1])
+    print_memory_usage("After Model Initialization")
+
+    # Loss function
+    def loss_fn(params, x, a, true_u):
+        pred_u = model.apply(params, x, a)
+        return jnp.mean((pred_u - true_u) ** 2)
+
+    # Define optimizer
+    optimizer = optax.adam(learning_rate=0.001)
+    opt_state = optimizer.init(params)
+
+    # Training step
+    @jax.jit
+    def train_step(params, opt_state, x, a, true_u):
+        loss, grads = jax.value_and_grad(loss_fn)(params, x, a, true_u)
+        updates, opt_state = optimizer.update(grads, opt_state)
+        params = optax.apply_updates(params, updates)
+        return params, opt_state, loss
+
+    # Tracking results efficiently
+    training_results = []
+    final_predictions = {}
+
+    # Training loop
+    num_epochs = 100000  # Train for 100k epochs
+
+    # Choose batch size based on grid size
+    # if grid_size <= 500:
+    #     batch_size = 16
+    # elif grid_size <= 2500:
+    #     batch_size = 8
+    # else:
+    #     batch_size = 2
+
+    if grid_size <= 500:
+        batch_size = 64
+    elif grid_size <= 2500:
+        batch_size = 32
+    else:
+        batch_size = 8
+
+    if solution_type == "manufactured":
+        num_batches = len(x_train) // batch_size
+    else:
+        num_batches = max(1, len(x_train) // batch_size)
+
+    print_memory_usage("Before Training Loop")
+
+    for epoch in trange(num_epochs):
+        epoch_start = time.time()
+        loss = 0.0  # Initialize loss for this epoch
+        for batch in range(num_batches):
+            start_idx = batch * batch_size
+            end_idx = start_idx + batch_size
+
+            x_batch = x_train[start_idx:end_idx]
+            a_batch = a_train[start_idx:end_idx] if a_train is not None else None
+            u_batch = u_train[start_idx:end_idx]
+
+            params, opt_state, loss = train_step(params, opt_state, x_batch, a_batch, u_batch)
+
+        # Compute predictions
+        @jax.jit
+        def predict_fn(params, x, a):
+            return model.apply(params, x, a)
+
+        def predict_in_batches(x, a, batch_size=16):
+            preds = []
+            for i in range(0, len(x), batch_size):
+                x_batch = x[i:i+batch_size]
+                a_batch = a[i:i+batch_size] if a is not None else None
+                pred = predict_fn(params, x_batch, a_batch)
+                preds.append(pred)
+            return jnp.concatenate(preds, axis=0)
+
+        if epoch % 100 == 0:
+            u_pred_train = predict_in_batches(x_train, a_train)
+            u_pred_test = predict_in_batches(x_test, a_test)
+            u_pred_heldout = predict_in_batches(x_heldout, a_heldout)
+
+            # Compute L2 errors
+            L2_error_train = jnp.linalg.norm(u_pred_train - u_train) / jnp.linalg.norm(u_train)
+            L2_error_test = jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test)
+
+            # Compute generalization error on held-out data
+            L2_error_heldout = jnp.linalg.norm(u_pred_heldout - u_heldout) / jnp.linalg.norm(u_heldout)
+            if solution_type == "manufactured":
+                generalization_error = float(L2_error_heldout)
+
+                # Store results
+                training_results.append({
+                    "epoch": epoch,
+                    "L2_error_train": float(L2_error_train),
+                    "L2_error_test": float(L2_error_test),
+                    "generalization_error": generalization_error
+                })
+            elif solution_type == "FEM":
+                # Compute true generalization error vs manufactured solution
+                generalization_error_fem = float(jnp.linalg.norm(u_pred_heldout - u_heldout) / jnp.linalg.norm(u_heldout))
+                generalization_error_true = float(jnp.linalg.norm(u_pred_heldout - u_exact_heldout) / jnp.linalg.norm(u_exact_heldout))
+
+                training_results.append({
+                    "epoch": epoch,
+                    "L2_error_train": float(L2_error_train),
+                    "L2_error_test": float(L2_error_test),
+                    "generalization_error_fem": generalization_error_fem,
+                    "generalization_error_true": generalization_error_true
+                })
+
+            print_memory_usage(f"Epoch {epoch}")
+            print(f"Epoch {epoch}, Loss: {loss:.6f}, L2 Error Train: {L2_error_train:.6f}, L2 Error Test: {L2_error_test:.6f}")
+            print(f"Epoch time: {time.time() - epoch_start:.2f}s")
+
+    # Save results
+    results_filename = f"../results/deeponets/2/deeponet_results_{solution_type}_{mesh_size[0]}x{mesh_size[1]}.json"
+
+    results_data = {
+        "training_results": training_results,
+        "solution_type": solution_type
+    }
+
+    with open(results_filename, "w") as f:
+        json.dump(results_data, f)
+
+
+    print(f"Training complete using {solution_type} solutions. Results saved to {results_filename}.")
+    print_memory_usage("After Training")

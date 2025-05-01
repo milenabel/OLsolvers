@@ -9,13 +9,14 @@ import gc  # Garbage collection
 import psutil
 from jax import random
 from sklearn.model_selection import train_test_split
+from tqdm import trange
 import pandas as pd
 import glob
 import random as pyrandom
 import time
 
 # Choose between "manufactured" and "FEM"
-solution_type = "FEM"  
+solution_type = "manufactured"  
 
 # Function to check memory usage
 def print_memory_usage(tag=""):
@@ -31,7 +32,7 @@ for mesh_size in mesh_sizes:
     training_results = []
 
     print(f"\n=== Running DeepONet for mesh {mesh_size[0]}x{mesh_size[1]} ({solution_type}) ===")
-    
+
     if solution_type == "manufactured":
         dataset_path = f"../results/manufactured/{mesh_size[0]}x{mesh_size[1]}/dataset_{mesh_size[0]}x{mesh_size[1]}.json"
         with open(dataset_path, "r") as f:
@@ -40,6 +41,8 @@ for mesh_size in mesh_sizes:
         u_values = jnp.array([sample["u_values"] for sample in dataset], dtype=jnp.float32)
         a_samples = jnp.array([sample["a_k"] for sample in dataset], dtype=jnp.float32)
         num_samples, grid_size = u_values.shape
+
+        # Manufactured data domain is assumed to be [0, 1] x [0, 1]
         Lx, Ly = 12.0, 12.0
 
         x_grid = jnp.linspace(0, Lx, int(np.sqrt(grid_size)), dtype=jnp.float32)
@@ -47,6 +50,7 @@ for mesh_size in mesh_sizes:
         X, Y = jnp.meshgrid(x_grid, y_grid, indexing="ij")
         x_inputs = jnp.hstack([X.flatten()[:, None], Y.flatten()[:, None]])
         x_inputs = jnp.tile(x_inputs[None, :, :], (num_samples, 1, 1))
+
 
     elif solution_type == "FEM":
         fem_path = f"../results/general/poisson_dataset_{mesh_size[0]}x{mesh_size[1]}.json"
@@ -139,14 +143,15 @@ for mesh_size in mesh_sizes:
                 *[nn.Dense(self.hidden_dim), nn.tanh] * (self.branch_layers - 1),
                 nn.Dense(self.output_dim)
             ])
-        
+
         def __call__(self, x, a=None):
-            trunk_out = jax.vmap(self.trunk_net)(x)
+            trunk_out = jax.vmap(self.trunk_net)(x)  # (batch, grid, out)
             if a is not None:
-                branch_out = self.branch_net(a)[:, None, :]
-                return jnp.sum(trunk_out * branch_out, axis=-1)
+                branch_out = jax.vmap(self.branch_net)(a)  # (batch, out)
+                return jnp.sum(trunk_out * branch_out[:, None, :], axis=-1)
             else:
                 return trunk_out.sum(axis=-1)
+
 
     # Initialize model
     model = DeepONet(trunk_layers=3, branch_layers=3, hidden_dim=64, output_dim=grid_size)
@@ -208,59 +213,48 @@ for mesh_size in mesh_sizes:
 
     print_memory_usage("Before Training Loop")
 
-    for epoch in range(num_epochs):
+# === Training loop: Full-batch gradient descent ===
+    training_results = []
+
+    for epoch in trange(num_epochs, desc=f"Mesh {mesh_size[0]}x{mesh_size[1]}, {solution_type}"):
         epoch_start = time.time()
-        loss = 0.0  # Initialize loss for this epoch
-        for batch in range(num_batches):
-            start_idx = batch * batch_size
-            end_idx = start_idx + batch_size
 
-            x_batch = x_train[start_idx:end_idx]
-            a_batch = a_train[start_idx:end_idx] if a_train is not None else None
-            u_batch = u_train[start_idx:end_idx]
+        # Full-batch update
+        params, opt_state, loss = train_step(params, opt_state, x_train, a_train, u_train)
 
-            params, opt_state, loss = train_step(params, opt_state, x_batch, a_batch, u_batch)
-
-        # Compute predictions
-        @jax.jit
-        def predict_fn(params, x, a):
-            return model.apply(params, x, a)
-
-        def predict_in_batches(x, a, batch_size=16):
-            preds = []
-            for i in range(0, len(x), batch_size):
-                x_batch = x[i:i+batch_size]
-                a_batch = a[i:i+batch_size] if a is not None else None
-                pred = predict_fn(params, x_batch, a_batch)
-                preds.append(pred)
-            return jnp.concatenate(preds, axis=0)
-
+        # Every N epochs: evaluate and store results
         if epoch % 100 == 0:
+            @jax.jit
+            def predict_fn(params, x, a):
+                return model.apply(params, x, a)
+
+            def predict_in_batches(x, a, batch_size=16):
+                preds = []
+                for i in range(0, len(x), batch_size):
+                    x_batch = x[i:i+batch_size]
+                    a_batch = a[i:i+batch_size] if a is not None else None
+                    pred = predict_fn(params, x_batch, a_batch)
+                    preds.append(pred)
+                return jnp.concatenate(preds, axis=0)
+
             u_pred_train = predict_in_batches(x_train, a_train)
             u_pred_test = predict_in_batches(x_test, a_test)
             u_pred_heldout = predict_in_batches(x_heldout, a_heldout)
 
-            # Compute L2 errors
             L2_error_train = jnp.linalg.norm(u_pred_train - u_train) / jnp.linalg.norm(u_train)
             L2_error_test = jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test)
-
-            # Compute generalization error on held-out data
             L2_error_heldout = jnp.linalg.norm(u_pred_heldout - u_heldout) / jnp.linalg.norm(u_heldout)
-            if solution_type == "manufactured":
-                generalization_error = float(L2_error_heldout)
 
-                # Store results
+            if solution_type == "manufactured":
                 training_results.append({
                     "epoch": epoch,
                     "L2_error_train": float(L2_error_train),
                     "L2_error_test": float(L2_error_test),
-                    "generalization_error": generalization_error
+                    "generalization_error": float(L2_error_heldout)
                 })
             elif solution_type == "FEM":
-                # Compute true generalization error vs manufactured solution
                 generalization_error_fem = float(jnp.linalg.norm(u_pred_heldout - u_heldout) / jnp.linalg.norm(u_heldout))
                 generalization_error_true = float(jnp.linalg.norm(u_pred_heldout - u_exact_heldout) / jnp.linalg.norm(u_exact_heldout))
-
                 training_results.append({
                     "epoch": epoch,
                     "L2_error_train": float(L2_error_train),
@@ -272,6 +266,7 @@ for mesh_size in mesh_sizes:
             print_memory_usage(f"Epoch {epoch}")
             print(f"Epoch {epoch}, Loss: {loss:.6f}, L2 Error Train: {L2_error_train:.6f}, L2 Error Test: {L2_error_test:.6f}")
             print(f"Epoch time: {time.time() - epoch_start:.2f}s")
+
 
     # Save results
     results_filename = f"../results/deeponets/2/deeponet_results_{solution_type}_{mesh_size[0]}x{mesh_size[1]}.json"

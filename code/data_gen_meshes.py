@@ -3,6 +3,7 @@ import numpy as np
 import ufl
 from mpi4py import MPI
 from dolfinx import fem, mesh
+from tqdm import trange
 import json
 import os
 
@@ -10,7 +11,7 @@ import os
 num_samples = 1000
 n_value = 8  # Number of basis functions
 Lx, Ly = 12.0, 12.0  # Domain size
-mesh_sizes = [(20, 20), (24, 24), (48, 48), (96, 96)]
+mesh_sizes = [(3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (20, 20), (24, 24), (48, 48), (96, 96)]
 base_path = "../results/manufactured"
 
 # Create base directory if needed
