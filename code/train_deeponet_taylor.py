@@ -16,8 +16,10 @@ from deeponet import DeepONet
 # Choose between "manufactured" and "FEM"
 solution_type = "FEM"
 # lambda_taylor = 1.0
-lambda_taylor_list = [1.0, 0.1, 10.0]  
-mesh_sizes = [(20, 20), (24, 24)]
+lambda_taylor_list = [0.1, 0.01, 0.001]
+mesh_sizes = [(20, 20)]
+split_point = 0.75  # fraction of epochs using only DeepONet loss
+
 
 # Function to check memory usage
 def print_memory_usage(tag=""):
@@ -88,13 +90,31 @@ for lambda_taylor in lambda_taylor_list:
         opt_state = optimizer.init(params)
 
         @jax.jit
-        def loss_fn(params, x, a, true_u):
+        def loss_deeponly(params, x, a, true_u):
+            pred_u = model.apply(params, x, a)
+            return jnp.mean((pred_u - true_u) ** 2)
+
+        @jax.jit
+        def loss_with_taylor(params, x, a, true_u):
             pred_u = model.apply(params, x, a)
             mse_u = jnp.mean((pred_u - true_u) ** 2)
             B, G, _ = x.shape
             d4x, d4y = compute_fourth_derivatives(model, params, x.reshape(-1, 2), jnp.repeat(a, G, axis=0))
             taylor_loss = jnp.mean((d4x + d4y) ** 2)
             return mse_u + lambda_taylor * ((h1 ** 2) / 12.0) * taylor_loss
+
+        def make_train_step(loss_fn):
+            @jax.jit
+            def step(params, opt_state, x, a, true_u):
+                loss, grads = jax.value_and_grad(loss_fn)(params, x, a, true_u)
+                updates, opt_state = optimizer.update(grads, opt_state)
+                params = optax.apply_updates(params, updates)
+                return params, opt_state, loss
+            return step
+
+        train_step_deeponly = make_train_step(loss_deeponly)
+        train_step_with_taylor = make_train_step(loss_with_taylor)
+
 
         @jax.jit
         def train_step(params, opt_state, x, a, true_u):

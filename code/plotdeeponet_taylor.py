@@ -5,7 +5,7 @@ import itertools
 
 # === SETTINGS ===
 Nx, Ny = 20, 20
-lambda_values = [0.1, 1.0]
+lambda_values = [0.1, 1.0, 10.0]
 results_dir = "../results/deeponets/taylor"
 figs_dir = f"../figs/taylor/deeponet_taylor_{Nx}x{Ny}"
 os.makedirs(figs_dir, exist_ok=True)
