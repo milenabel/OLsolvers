@@ -5,9 +5,9 @@ import itertools
 
 # === SETTINGS ===
 Nx, Ny = 20, 20
-lambda_values = [0.1, 1.0, 10.0]
+lambda_values = [0.1, 0.01, 0.001]
 results_dir = "../results/deeponets/taylor"
-figs_dir = f"../figs/taylor/deeponet_taylor_{Nx}x{Ny}"
+figs_dir = f"../figs/taylor/deeponet_taylor_{Nx}x{Ny}_avg"
 os.makedirs(figs_dir, exist_ok=True)
 plot_filename = os.path.join(figs_dir, f"l2_errors_vs_epochs_{Nx}x{Ny}.png")
 
@@ -18,7 +18,7 @@ color_cycle = itertools.cycle(plt.get_cmap("tab10").colors)
 plt.figure(figsize=(10, 6))
 
 for lam in lambda_values:
-    results_filename = os.path.join(results_dir, f"deeponet_results_FEM_lambda{lam}_{Nx}x{Ny}.json")
+    results_filename = os.path.join(results_dir, f"deeponet_results_FEM_lambda{lam}_{Nx}x{Ny}_avg.json")
 
     if not os.path.exists(results_filename):
         print(f"[Warning] File not found: {results_filename}")
