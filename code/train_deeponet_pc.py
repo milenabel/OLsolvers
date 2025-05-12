@@ -7,7 +7,7 @@ import os
 from tqdm import trange
 from jax import random, grad, value_and_grad
 from sklearn.model_selection import train_test_split
-from predictor_corrector import Predictor, Corrector, PredictorCorrector
+from deeponet_pc import Predictor, Corrector, PredictorCorrector
 
 # === Settings ===
 mesh_size = (20, 20)
@@ -15,7 +15,7 @@ split_point = 0.75
 num_epochs = 100000
 batch_size = 32
 learning_rate = 0.001
-results_dir = "../results/predictor_corrector"
+results_dir = "../results/deeponets/predictor_corrector"
 os.makedirs(results_dir, exist_ok=True)
 
 # === Load Data ===
@@ -37,27 +37,42 @@ a_train, a_test, fem_u_train, fem_u_test, manu_u_train, manu_u_test = train_test
 
 # === Model Setup ===
 key = random.PRNGKey(42)
-predictor = Predictor(hidden_dim=64, output_dim=fem_u.shape[1])
-corrector = Corrector(hidden_dim=64, output_dim=fem_u.shape[1])
+predictor = Predictor(branch_layers=3, trunk_layers=3, hidden_dim=64, output_dim=fem_u.shape[1])
+corrector = Corrector(branch_layers=3, trunk_layers=3, hidden_dim=64, output_dim=fem_u.shape[1])
 model = PredictorCorrector(predictor=predictor, corrector=corrector)
 
-params = model.init(key, jnp.array(a_train[0]), jnp.array(a_train[0]))
+x_dummy = jnp.ones((1, 2), dtype=jnp.float32)
+a_dummy = jnp.ones((1, a_train.shape[1]), dtype=jnp.float32)
+init_variables = model.init(key, x_dummy, a_dummy)
+params = init_variables["params"]
+
 optimizer = optax.adam(learning_rate)
 opt_state = optimizer.init(params)
 
+# === Wrapper functions ===
+def call_predictor(params, x, a_input):
+    return model.predictor.apply({"params": params["predictor"]}, x, a_input)
+
+def call_corrector(params, x, u_approx):
+    return model.corrector.apply({"params": params["corrector"]}, x, u_approx)
+
 # === Loss Functions ===
-def loss_predictor(params, inputs, targets):
-    pred = model.predictor.apply(params["predictor"], inputs)
-    return jnp.mean((pred - targets) ** 2)
+def loss_predictor(params, a_input, fem_targets):
+    x_dummy = jnp.ones((a_input.shape[0], 2), dtype=jnp.float32)
+    pred = call_predictor(params, x_dummy, a_input)
+    return jnp.mean((pred - fem_targets) ** 2)
 
-def loss_corrector(params, preds, true):
-    corrected = model.corrector.apply(params["corrector"], preds)
-    return jnp.mean((corrected - true) ** 2)
+def loss_corrector(params, a_input, manu_targets):
+    pred = call_predictor(params, a_input)
+    x_dummy = jnp.ones((a_input.shape[0], 2), dtype=jnp.float32)
+    corrected = call_corrector(params, x_dummy, pred)
+    return jnp.mean((corrected - manu_targets) ** 2)
 
-def loss_combined(params, inputs, true):
-    pred = model.predictor.apply(params["predictor"], inputs)
-    corrected = model.corrector.apply(params["corrector"], pred)
-    return jnp.mean((corrected - true) ** 2)
+def loss_combined(params, a_input, manu_targets):
+    pred = call_predictor(params, a_input)
+    x_dummy = jnp.ones((a_input.shape[0], 2), dtype=jnp.float32)
+    corrected = call_corrector(params, x_dummy, pred)
+    return jnp.mean((corrected - manu_targets) ** 2)
 
 # === Training Step Generator ===
 def make_train_step(loss_fn):
@@ -91,8 +106,10 @@ for epoch in trange(num_epochs, desc="Training Predictor-Corrector"):
 
     # === Logging ===
     if epoch % 100 == 0:
-        pred_test = model.predictor.apply(params["predictor"], jnp.array(a_test))
-        corrected_test = model.corrector.apply(params["corrector"], pred_test)
+        pred_test = call_predictor(params, jnp.array(a_test))
+        x_test_dummy = jnp.ones((a_test.shape[0], 2), dtype=jnp.float32)
+        corrected_test = call_corrector(params, x_test_dummy, pred_test)
+
         L2_pred = float(jnp.linalg.norm(pred_test - fem_u_test) / jnp.linalg.norm(fem_u_test))
         L2_corr = float(jnp.linalg.norm(corrected_test - manu_u_test) / jnp.linalg.norm(manu_u_test))
 

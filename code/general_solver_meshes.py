@@ -11,7 +11,8 @@ import pandas as pd
 
 
 class GeneralSolver:
-    def __init__(self, domain_size=(12.0, 12.0), mesh_sizes=[(20, 20), (24, 24), (48, 48), (96, 96)],
+    # def __init__(self, domain_size=(12.0, 12.0), mesh_sizes=[(20, 20), (24, 24), (48, 48), (96, 96)],
+    def __init__(self, domain_size=(12.0, 12.0), mesh_sizes=[(20, 20)],
                  results_dir="../results/general", rhs_base_dir="../results/manufactured"):
         self.domain_size = domain_size
         self.mesh_sizes = mesh_sizes

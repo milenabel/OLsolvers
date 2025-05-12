@@ -1,0 +1,6 @@
+{
+  "seed": 77,
+  "L2_error_test": 0.620064914226532,
+  "generalization_error_fem": 0.620064914226532,
+  "generalization_error_true": 0.7468438148498535
+}

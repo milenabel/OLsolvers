@@ -1,0 +1,5 @@
+{
+  "seed": 42,
+  "L2_error_test": 0.016355445608496666,
+  "generalization_error_true": 0.016355445608496666
+}

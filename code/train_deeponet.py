@@ -1,152 +1,95 @@
-import jax
-import numpy as np
-import jax.numpy as jnp
-import optax
-import flax.linen as nn
-import json
 import os
-import gc  # Garbage collection
-import psutil
-from jax import random
-from sklearn.model_selection import train_test_split
-from deeponet import DeepONet
+import json
+import numpy as np
+import jax
+import jax.numpy as jnp
+import flax.linen as nn
+import optax
 from tqdm import trange
-import pandas as pd
-import glob
-import random as pyrandom
+from jax import random
+from deeponet import DeepONet
 import time
+import psutil
 
-# Choose between "manufactured" and "FEM"
-solution_type = "manufactured"  
+# === SETTINGS ===
+solution_type = "manufactured"  # "manufactured" or "FEM"
+mesh_sizes = [(20, 20)]
+seeds = [7, 42, 77]
+num_epochs = 100000
 
-# Function to check memory usage
+# === MEMORY CHECK UTILITY ===
 def print_memory_usage(tag=""):
     process = psutil.Process(os.getpid())
     print(f"[{tag}] Memory Usage: {process.memory_info().rss / 1e6:.2f} MB")
 
+# === TRAINING FUNCTION ===
+def run_training_for_seed(seed, mesh_size):
+    # Nx, Ny = mesh_size
+    split_dir = f"../results/splits/{mesh_size[0]}x{mesh_size[1]}"
+    data_dir = f"../results/{'manufactured' if solution_type == 'manufactured' else 'general'}"
 
-# Define mesh sizes to run over
-mesh_sizes = [(20, 20), (24, 24), (48, 48), (96, 96)]
-# mesh_sizes = [(96, 96)]
+    # === Load split indices ===
+    with open(os.path.join(split_dir, f"train_test_split_indices_seed{seed}.json")) as f:
+        split_indices = json.load(f)
+    train_idx = np.array(split_indices["train_idx"])
+    test_idx = np.array(split_indices["test_idx"])
 
-for mesh_size in mesh_sizes:
-    training_results = []
-
-    print(f"\n=== Running DeepONet for mesh {mesh_size[0]}x{mesh_size[1]} ({solution_type}) ===")
-
+    # === Load corresponding data ===
     if solution_type == "manufactured":
-        dataset_path = f"../results/manufactured/{mesh_size[0]}x{mesh_size[1]}/dataset_{mesh_size[0]}x{mesh_size[1]}.json"
-        with open(dataset_path, "r") as f:
-            dataset = json.load(f)
+        with open(os.path.join(split_dir, f"manu_train_seed{seed}.json")) as f:
+            manu_train = json.load(f)
+        with open(os.path.join(split_dir, f"manu_test_seed{seed}.json")) as f:
+            manu_test = json.load(f)
 
-        u_values = jnp.array([sample["u_values"] for sample in dataset], dtype=jnp.float32)
-        a_samples = jnp.array([sample["a_k"] for sample in dataset], dtype=jnp.float32)
-        num_samples, grid_size = u_values.shape
-
-        # Manufactured data domain is assumed to be [0, 1] x [0, 1]
+        a_train = jnp.array([d["a_k"] for d in manu_train], dtype=jnp.float32)
+        u_train = jnp.array([d["u_values"] for d in manu_train], dtype=jnp.float32)
+        a_test = jnp.array([d["a_k"] for d in manu_test], dtype=jnp.float32)
+        u_test = jnp.array([d["u_values"] for d in manu_test], dtype=jnp.float32)
         Lx, Ly = 12.0, 12.0
 
-        x_grid = jnp.linspace(0, Lx, int(np.sqrt(grid_size)), dtype=jnp.float32)
-        y_grid = jnp.linspace(0, Ly, int(np.sqrt(grid_size)), dtype=jnp.float32)
-        X, Y = jnp.meshgrid(x_grid, y_grid, indexing="ij")
-        x_inputs = jnp.hstack([X.flatten()[:, None], Y.flatten()[:, None]])
-        x_inputs = jnp.tile(x_inputs[None, :, :], (num_samples, 1, 1))
-
-
     elif solution_type == "FEM":
-        fem_path = f"../results/general/poisson_dataset_{mesh_size[0]}x{mesh_size[1]}.json"
-        with open(fem_path, "r") as f:
-            data = json.load(f)
+        with open(os.path.join(split_dir, f"fem_train_seed{seed}.json")) as f:
+            fem_train = json.load(f)
+        with open(os.path.join(split_dir, f"fem_test_seed{seed}.json")) as f:
+            fem_test = json.load(f)
 
-        u_values = jnp.array(data["u_values"], dtype=jnp.float32)
-        f_values = jnp.array(data["f_values"], dtype=jnp.float32)
-        num_samples, grid_size = u_values.shape
-        Lx, Ly = data["domain_size"]
-        a_samples = f_values
+        a_train = jnp.array(fem_train["f_values"], dtype=jnp.float32)
+        u_train = jnp.array(fem_train["u_values"], dtype=jnp.float32)
+        a_test = jnp.array(fem_test["f_values"], dtype=jnp.float32)
+        u_test = jnp.array(fem_test["u_values"], dtype=jnp.float32)
+        Lx, Ly = fem_train["domain_size"]
 
-        x_grid = jnp.linspace(0, Lx, int(np.sqrt(grid_size)), dtype=jnp.float32)
-        y_grid = jnp.linspace(0, Ly, int(np.sqrt(grid_size)), dtype=jnp.float32)
-        X, Y = jnp.meshgrid(x_grid, y_grid, indexing="ij")
-        x_inputs = jnp.hstack([X.flatten()[:, None], Y.flatten()[:, None]])
-        x_inputs = jnp.tile(x_inputs[None, :, :], (num_samples, 1, 1))
+    # === For generalization error vs manufactured ===
+    manu_path = f"../results/manufactured/{mesh_size[0]}x{mesh_size[1]}/dataset_{mesh_size[0]}x{mesh_size[1]}.json"
+    with open(manu_path, "r") as f:
+        manu_data = json.load(f)
+    u_manu_all = jnp.array([d["u_values"] for d in manu_data], dtype=jnp.float32)
+    u_manu_test = u_manu_all[test_idx]
 
-        # Load matching manufactured u_exact for true generalization error
-        manu_path = f"../results/manufactured/{mesh_size[0]}x{mesh_size[1]}/dataset_{mesh_size[0]}x{mesh_size[1]}.json"
-        with open(manu_path, "r") as f:
-            manufactured_data = json.load(f)
-        u_exact_all = jnp.array([sample["u_values"] for sample in manufactured_data], dtype=jnp.float32)
+    # === Prepare x grid ===
+    grid_size = u_train.shape[1]
+    Nx = int(np.sqrt(grid_size))  # infer Nx from data
+    Ny = Nx
+    assert Nx * Ny == u_train.shape[1], "Grid size doesn't match expected square layout"
+    x_grid = jnp.linspace(0, Lx, Nx, dtype=jnp.float32)
+    y_grid = jnp.linspace(0, Ly, Ny, dtype=jnp.float32)
+    X, Y = jnp.meshgrid(x_grid, y_grid, indexing="ij")
+    x_inputs = jnp.hstack([X.flatten()[:, None], Y.flatten()[:, None]])
+    x_train = jnp.tile(x_inputs[None, :, :], (u_train.shape[0], 1, 1))
+    x_test = jnp.tile(x_inputs[None, :, :], (u_test.shape[0], 1, 1))
 
-        # Overwrite a_samples with the same RHS as in manufactured data
-        a_samples = jnp.array([sample["a_k"] for sample in manufactured_data], dtype=jnp.float32)
-
-        # Split u_exact_all the same way as a_samples (to get u_exact_heldout)
-        _, _, u_exact_train, u_exact_heldout = train_test_split(
-            a_samples, u_exact_all, test_size=0.2, random_state=42
-        )
-        _, u_exact_heldout = train_test_split(
-            u_exact_train, test_size=0.125, random_state=42
-        )
-
-
-    # Print dataset info
-    print(f"Dataset loaded: {num_samples} samples from {solution_type} solutions")
-    if a_samples is not None:
-        print(f"a_samples shape: {a_samples.shape}")
-    print(f"u_values shape: {u_values.shape}")
-    print_memory_usage("After Loading Dataset")
-    print(f"x_inputs shape: {x_inputs.shape}, u_values shape: {u_values.shape}")
-    print_memory_usage("After Processing Inputs")    
-
-
-    # Split data into training (80%) and testing sets (20%)
-    if a_samples is not None:
-        a_train, a_test, u_train, u_test, x_train, x_test = train_test_split(
-            a_samples, u_values, x_inputs, test_size=0.2, random_state=42
-        )
-    else:
-        u_train, u_test, x_train, x_test = train_test_split(
-            u_values, x_inputs, test_size=0.2, random_state=42
-        )
-        a_train = a_test = None
-
-    # Define held-out dataset (10% of total samples) for generalization error
-    if a_samples is not None:
-        a_train, a_heldout, u_train, u_heldout, x_train, x_heldout = train_test_split(
-            a_train, u_train, x_train, test_size=0.125, random_state=42
-        )
-    else:
-        u_train, u_heldout, x_train, x_heldout = train_test_split(
-            u_train, x_train, test_size=0.125, random_state=42
-        )
-        a_heldout = None
-
-    print(f"Training samples: {u_train.shape[0]}, Testing samples: {u_test.shape[0]}, Held-out samples: {u_heldout.shape[0]}")
-    print_memory_usage("After Train-Test Split")
-
-    # Initialize model
+    # === Initialize model ===
     model = DeepONet(trunk_layers=3, branch_layers=3, hidden_dim=64, output_dim=grid_size)
-    # key = random.PRNGKey(0)
-
-    seed = 42
-    np.random.seed(seed)
-    pyrandom.seed(seed)
-    key = jax.random.PRNGKey(seed)
-
-
-    print_memory_usage("Before Model Initialization")
+    key = random.PRNGKey(seed)
     params = model.init(key, x_train[0:1], a_train[0:1])
-    print_memory_usage("After Model Initialization")
+    optimizer = optax.adam(learning_rate=0.001)
+    opt_state = optimizer.init(params)
 
-    # Loss function
+    # === Loss and Train step ===
     def loss_fn(params, x, a, true_u):
         pred_u = model.apply(params, x, a)
         return jnp.mean((pred_u - true_u) ** 2)
 
-    # Define optimizer
-    optimizer = optax.adam(learning_rate=0.001)
-    opt_state = optimizer.init(params)
-
-    # Training step
     @jax.jit
     def train_step(params, opt_state, x, a, true_u):
         loss, grads = jax.value_and_grad(loss_fn)(params, x, a, true_u)
@@ -154,111 +97,100 @@ for mesh_size in mesh_sizes:
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss
 
-    # Tracking results efficiently
+    @jax.jit
+    def predict_fn(params, x, a):
+        return model.apply(params, x, a)
+
+    def predict_in_batches(x, a, batch_size=16):
+        preds = []
+        for i in range(0, len(x), batch_size):
+            x_batch = x[i:i+batch_size]
+            a_batch = a[i:i+batch_size]
+            pred = predict_fn(params, x_batch, a_batch)
+            preds.append(pred)
+        return jnp.concatenate(preds, axis=0)
+
+    # === Train ===
     training_results = []
-    final_predictions = {}
-
-    # Training loop
-    num_epochs = 100000  # Train for 100k epochs
-
-    # Choose batch size based on grid size
-    # if grid_size <= 500:
-    #     batch_size = 16
-    # elif grid_size <= 2500:
-    #     batch_size = 8
-    # else:
-    #     batch_size = 2
-
     if grid_size <= 500:
         batch_size = 64
     elif grid_size <= 2500:
         batch_size = 32
     else:
         batch_size = 8
+    num_batches = max(1, len(x_train) // batch_size)
 
-    if solution_type == "manufactured":
-        num_batches = len(x_train) // batch_size
-    else:
-        num_batches = max(1, len(x_train) // batch_size)
-
-    print_memory_usage("Before Training Loop")
-
-    for epoch in trange(num_epochs):
+    for epoch in trange(num_epochs, desc=f"Training DeepONet {solution_type} - {mesh_size} - Seed {seed}"):
         epoch_start = time.time()
-        loss = 0.0  # Initialize loss for this epoch
         for batch in range(num_batches):
-            start_idx = batch * batch_size
-            end_idx = start_idx + batch_size
-
-            x_batch = x_train[start_idx:end_idx]
-            a_batch = a_train[start_idx:end_idx] if a_train is not None else None
-            u_batch = u_train[start_idx:end_idx]
-
-            params, opt_state, loss = train_step(params, opt_state, x_batch, a_batch, u_batch)
-
-        # Compute predictions
-        @jax.jit
-        def predict_fn(params, x, a):
-            return model.apply(params, x, a)
-
-        def predict_in_batches(x, a, batch_size=16):
-            preds = []
-            for i in range(0, len(x), batch_size):
-                x_batch = x[i:i+batch_size]
-                a_batch = a[i:i+batch_size] if a is not None else None
-                pred = predict_fn(params, x_batch, a_batch)
-                preds.append(pred)
-            return jnp.concatenate(preds, axis=0)
+            start, end = batch * batch_size, (batch + 1) * batch_size
+            x_batch = x_train[start:end]
+            a_batch = a_train[start:end]
+            u_batch = u_train[start:end]
+            params, opt_state, _ = train_step(params, opt_state, x_batch, a_batch, u_batch)
 
         if epoch % 100 == 0:
             u_pred_train = predict_in_batches(x_train, a_train)
-            u_pred_test = predict_in_batches(x_test, a_test)
-            u_pred_heldout = predict_in_batches(x_heldout, a_heldout)
 
             # Compute L2 errors
             L2_error_train = jnp.linalg.norm(u_pred_train - u_train) / jnp.linalg.norm(u_train)
-            L2_error_test = jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test)
 
-            # Compute generalization error on held-out data
-            L2_error_heldout = jnp.linalg.norm(u_pred_heldout - u_heldout) / jnp.linalg.norm(u_heldout)
-            if solution_type == "manufactured":
-                generalization_error = float(L2_error_heldout)
-
-                # Store results
-                training_results.append({
-                    "epoch": epoch,
-                    "L2_error_train": float(L2_error_train),
-                    "L2_error_test": float(L2_error_test),
-                    "generalization_error": generalization_error
-                })
-            elif solution_type == "FEM":
-                # Compute true generalization error vs manufactured solution
-                generalization_error_fem = float(jnp.linalg.norm(u_pred_heldout - u_heldout) / jnp.linalg.norm(u_heldout))
-                generalization_error_true = float(jnp.linalg.norm(u_pred_heldout - u_exact_heldout) / jnp.linalg.norm(u_exact_heldout))
-
-                training_results.append({
-                    "epoch": epoch,
-                    "L2_error_train": float(L2_error_train),
-                    "L2_error_test": float(L2_error_test),
-                    "generalization_error_fem": generalization_error_fem,
-                    "generalization_error_true": generalization_error_true
-                })
+            # Store results
+            training_results.append({
+                "epoch": epoch,
+                "L2_error_train": float(L2_error_train),
+            })
 
             print_memory_usage(f"Epoch {epoch}")
-            print(f"Epoch {epoch}, Loss: {loss:.6f}, L2 Error Train: {L2_error_train:.6f}, L2 Error Test: {L2_error_test:.6f}")
+            print(f"Epoch {epoch}, L2 Error Train: {L2_error_train:.6f}")
             print(f"Epoch time: {time.time() - epoch_start:.2f}s")
 
-    # Save results
-    results_filename = f"../results/deeponets/2/deeponet_results_{solution_type}_{mesh_size[0]}x{mesh_size[1]}.json"
+    # === Final Evaluation ===
+    
+    u_pred_test = predict_in_batches(x_test, a_test)
 
-    results_data = {
-        "training_results": training_results,
-        "solution_type": solution_type
+    L2_test = float(jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test))
+
+    result_dict = {
+        "seed": seed,
+        "L2_error_test": L2_test,
     }
 
-    with open(results_filename, "w") as f:
-        json.dump(results_data, f)
+    if solution_type == "FEM":
+        gen_error_fem = float(jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test))
+        gen_error_true = float(jnp.linalg.norm(u_pred_test - u_manu_test) / jnp.linalg.norm(u_manu_test))
+        result_dict["generalization_error_fem"] = gen_error_fem
+        result_dict["generalization_error_true"] = gen_error_true
 
+    elif solution_type == "manufactured":
+        gen_error_true = L2_test
+        result_dict["generalization_error_true"] = gen_error_true
 
-    print(f"Training complete using {solution_type} solutions. Results saved to {results_filename}.")
-    print_memory_usage("After Training")
+    return result_dict
+
+# === MAIN EXECUTION ===
+for mesh_size in mesh_sizes:
+    results_dir = f"../results/deeponets/2/{mesh_size[0]}x{mesh_size[1]}"
+    os.makedirs(results_dir, exist_ok=True)
+
+    all_results = []
+    for seed in seeds:
+        result = run_training_for_seed(seed, mesh_size)
+        all_results.append(result)
+
+        # Save per-seed results
+        file_path = os.path.join(results_dir, f"deeponet_results_{solution_type}_{mesh_size[0]}x{mesh_size[1]}_seed{seed}.json")
+        with open(file_path, "w") as f:
+            json.dump(result, f, indent=2)
+
+    # Save averaged results
+    avg_result = {}
+    for key in all_results[0]:
+        if key == "seed": continue
+        avg_result[key] = float(np.mean([r[key] for r in all_results]))
+
+    avg_file = os.path.join(results_dir, f"deeponet_results_{solution_type}_avg.json")
+    with open(avg_file, "w") as f:
+        json.dump(avg_result, f, indent=2)
+
+    print(f"Saved averaged results to {avg_file}")

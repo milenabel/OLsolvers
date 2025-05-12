@@ -1,37 +1,3 @@
-# import jax
-# import jax.numpy as jnp
-# import flax.linen as nn
-
-# class DeepONet(nn.Module):
-#     trunk_layers: int
-#     branch_layers: int
-#     hidden_dim: int
-#     output_dim: int
-
-#     def setup(self):
-#         self.trunk_net = nn.Sequential([
-#             nn.Dense(self.hidden_dim),
-#             nn.tanh,
-#             *[layer for _ in range(self.trunk_layers - 1) for layer in (nn.Dense(self.hidden_dim), nn.tanh)],
-#             nn.Dense(self.output_dim)
-#         ])
-
-#         self.branch_net = nn.Sequential([
-#             nn.Dense(self.hidden_dim),
-#             nn.tanh,
-#             *[layer for _ in range(self.branch_layers - 1) for layer in (nn.Dense(self.hidden_dim), nn.tanh)],
-#             nn.Dense(self.output_dim)
-#         ])
-
-#     def __call__(self, x, a=None):
-#         trunk_out = jax.vmap(self.trunk_net)(x)  # (batch, grid, out)
-#         if a is not None:
-#             branch_out = jax.vmap(self.branch_net)(a)  # (batch, out)
-#             return jnp.sum(trunk_out * branch_out[:, None, :], axis=-1)
-#         else:
-#             return trunk_out.sum(axis=-1)
-
-
 import jax
 import jax.numpy as jnp
 import flax.linen as nn

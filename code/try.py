@@ -1,284 +1,210 @@
-import jax
-import numpy as np
-import jax.numpy as jnp
-import optax
-import flax.linen as nn
-import json
 import os
-import gc  # Garbage collection
-import psutil
-from jax import random
-from sklearn.model_selection import train_test_split
-from tqdm import trange
-import pandas as pd
-import glob
-import random as pyrandom
+import json
 import time
+import numpy as np
+import jax
+import jax.numpy as jnp
+import flax.linen as nn
+import optax
+from jax import random, grad, value_and_grad
+from tqdm import trange
+from deeponet import DeepONet  
+import time
+import psutil
 
-# Choose between "manufactured" and "FEM"
-solution_type = "manufactured"  
+# === SETTINGS ===
+solution_type = "FEM"
+mesh_sizes = [(20, 20)]
+lambda_taylor_list = [0.1, 0.01, 0.001]
+lambda_phys_list = [1, 0.1, 0.01, 0.001]
+lambda_reg_list = [1e-6]
+seeds = [7, 42, 77]
+num_epochs = 100000
 
-# Function to check memory usage
+# === MEMORY CHECK UTILITY ===
 def print_memory_usage(tag=""):
     process = psutil.Process(os.getpid())
     print(f"[{tag}] Memory Usage: {process.memory_info().rss / 1e6:.2f} MB")
 
+# === FOURTH ORDER DERIVATIVE UTILITY ===
+def compute_fourth_derivatives(model, params, x, a):
+    def apply_fn(xi, ai):
+        return model.apply(params, xi, ai)
 
-# Define mesh sizes to run over
-mesh_sizes = [(20, 20), (24, 24), (48, 48), (96, 96)]
-# mesh_sizes = [(96, 96)]
+    def fourth_deriv_scalar(xi, ai):
+        x_fixed, y_fixed = xi[0], xi[1]
 
-for mesh_size in mesh_sizes:
-    training_results = []
+        def u_x(x_val): return apply_fn(jnp.array([x_val, y_fixed]), ai)
+        def u_y(y_val): return apply_fn(jnp.array([x_fixed, y_val]), ai)
 
-    print(f"\n=== Running DeepONet for mesh {mesh_size[0]}x{mesh_size[1]} ({solution_type}) ===")
+        d4x = grad(grad(grad(grad(u_x))))(x_fixed)
+        d4y = grad(grad(grad(grad(u_y))))(y_fixed)
+        return d4x, d4y
 
-    if solution_type == "manufactured":
-        dataset_path = f"../results/manufactured/{mesh_size[0]}x{mesh_size[1]}/dataset_{mesh_size[0]}x{mesh_size[1]}.json"
-        with open(dataset_path, "r") as f:
-            dataset = json.load(f)
+    return jax.vmap(fourth_deriv_scalar)(x, a)
 
-        u_values = jnp.array([sample["u_values"] for sample in dataset], dtype=jnp.float32)
-        a_samples = jnp.array([sample["a_k"] for sample in dataset], dtype=jnp.float32)
-        num_samples, grid_size = u_values.shape
+# === PHYSICS RESIDUAL ===
+def compute_laplacian(model, params, x, a):
+    def u_fn(xi, ai):
+        return model.apply(params, xi, ai)
 
-        # Manufactured data domain is assumed to be [0, 1] x [0, 1]
-        Lx, Ly = 12.0, 12.0
+    def laplace_scalar(xi, ai):
+        def u_x(x_): return u_fn(jnp.array([x_, xi[1]]), ai)
+        def u_y(y_): return u_fn(jnp.array([xi[0], y_]), ai)
 
-        x_grid = jnp.linspace(0, Lx, int(np.sqrt(grid_size)), dtype=jnp.float32)
-        y_grid = jnp.linspace(0, Ly, int(np.sqrt(grid_size)), dtype=jnp.float32)
-        X, Y = jnp.meshgrid(x_grid, y_grid, indexing="ij")
-        x_inputs = jnp.hstack([X.flatten()[:, None], Y.flatten()[:, None]])
-        x_inputs = jnp.tile(x_inputs[None, :, :], (num_samples, 1, 1))
+        d2x = grad(grad(u_x))(xi[0])
+        d2y = grad(grad(u_y))(xi[1])
+        return d2x + d2y
 
+    return jax.vmap(laplace_scalar)(x, a)
 
-    elif solution_type == "FEM":
-        fem_path = f"../results/general/poisson_dataset_{mesh_size[0]}x{mesh_size[1]}.json"
-        with open(fem_path, "r") as f:
-            data = json.load(f)
+# === TRAINING FUNCTION ===
+def run_training_for_seed(seed, mesh_size, lambda_taylor, lambda_phys, lambda_reg):
+    split_dir = f"../results/splits/{mesh_size[0]}x{mesh_size[1]}"
+    data_dir = "../results/general"
 
-        u_values = jnp.array(data["u_values"], dtype=jnp.float32)
-        f_values = jnp.array(data["f_values"], dtype=jnp.float32)
-        num_samples, grid_size = u_values.shape
-        Lx, Ly = data["domain_size"]
-        a_samples = f_values
+    # === Load split data ===
+    with open(os.path.join(split_dir, f"fem_train_seed{seed}.json")) as f:
+        fem_train = json.load(f)
+    with open(os.path.join(split_dir, f"fem_test_seed{seed}.json")) as f:
+        fem_test = json.load(f)
 
-        x_grid = jnp.linspace(0, Lx, int(np.sqrt(grid_size)), dtype=jnp.float32)
-        y_grid = jnp.linspace(0, Ly, int(np.sqrt(grid_size)), dtype=jnp.float32)
-        X, Y = jnp.meshgrid(x_grid, y_grid, indexing="ij")
-        x_inputs = jnp.hstack([X.flatten()[:, None], Y.flatten()[:, None]])
-        x_inputs = jnp.tile(x_inputs[None, :, :], (num_samples, 1, 1))
+    a_train = jnp.array(fem_train["f_values"], dtype=jnp.float32)
+    u_train = jnp.array(fem_train["u_values"], dtype=jnp.float32)
+    a_test = jnp.array(fem_test["f_values"], dtype=jnp.float32)
+    u_test = jnp.array(fem_test["u_values"], dtype=jnp.float32)
+    Lx, Ly = fem_train["domain_size"]
 
-        # Load matching manufactured u_exact for true generalization error
-        manu_path = f"../results/manufactured/{mesh_size[0]}x{mesh_size[1]}/dataset_{mesh_size[0]}x{mesh_size[1]}.json"
-        with open(manu_path, "r") as f:
-            manufactured_data = json.load(f)
-        u_exact_all = jnp.array([sample["u_values"] for sample in manufactured_data], dtype=jnp.float32)
+    # === Load manufactured truth ===
+    with open(f"../results/manufactured/{mesh_size[0]}x{mesh_size[1]}/dataset_{mesh_size[0]}x{mesh_size[1]}.json", "r") as f:
+        manu_data = json.load(f)
+    u_manu_test = jnp.array([d["u_values"] for d in manu_data], dtype=jnp.float32)[
+        np.array(json.load(open(os.path.join(split_dir, f"train_test_split_indices_seed{seed}.json")))["test_idx"])
+    ]
 
-        # Overwrite a_samples with the same RHS as in manufactured data
-        a_samples = jnp.array([sample["a_k"] for sample in manufactured_data], dtype=jnp.float32)
+    # === Prepare grid ===
+    grid_size = u_train.shape[1]
+    Nx = int(np.sqrt(grid_size))
+    h = Lx / (Nx - 1)
+    x_vals = jnp.linspace(0, Lx, Nx, dtype=jnp.float32)
+    y_vals = jnp.linspace(0, Ly, Nx, dtype=jnp.float32)
+    X, Y = jnp.meshgrid(x_vals, y_vals, indexing="ij")
+    x_inputs = jnp.hstack([X.flatten()[:, None], Y.flatten()[:, None]])
+    x_train = jnp.tile(x_inputs[None, :, :], (u_train.shape[0], 1, 1))
+    x_test = jnp.tile(x_inputs[None, :, :], (u_test.shape[0], 1, 1))
 
-        # Split u_exact_all the same way as a_samples (to get u_exact_heldout)
-        _, _, u_exact_train, u_exact_heldout = train_test_split(
-            a_samples, u_exact_all, test_size=0.2, random_state=42
-        )
-        _, u_exact_heldout = train_test_split(
-            u_exact_train, test_size=0.125, random_state=42
-        )
-
-
-    # Print dataset info
-    print(f"Dataset loaded: {num_samples} samples from {solution_type} solutions")
-    if a_samples is not None:
-        print(f"a_samples shape: {a_samples.shape}")
-    print(f"u_values shape: {u_values.shape}")
-    print_memory_usage("After Loading Dataset")
-    print(f"x_inputs shape: {x_inputs.shape}, u_values shape: {u_values.shape}")
-    print_memory_usage("After Processing Inputs")    
-
-
-    # Split data into training (80%) and testing sets (20%)
-    if a_samples is not None:
-        a_train, a_test, u_train, u_test, x_train, x_test = train_test_split(
-            a_samples, u_values, x_inputs, test_size=0.2, random_state=42
-        )
-    else:
-        u_train, u_test, x_train, x_test = train_test_split(
-            u_values, x_inputs, test_size=0.2, random_state=42
-        )
-        a_train = a_test = None
-
-    # Define held-out dataset (10% of total samples) for generalization error
-    if a_samples is not None:
-        a_train, a_heldout, u_train, u_heldout, x_train, x_heldout = train_test_split(
-            a_train, u_train, x_train, test_size=0.125, random_state=42
-        )
-    else:
-        u_train, u_heldout, x_train, x_heldout = train_test_split(
-            u_train, x_train, test_size=0.125, random_state=42
-        )
-        a_heldout = None
-
-    print(f"Training samples: {u_train.shape[0]}, Testing samples: {u_test.shape[0]}, Held-out samples: {u_heldout.shape[0]}")
-    print_memory_usage("After Train-Test Split")
-
-    # Define DeepONet model with tanh activation
-    class DeepONet(nn.Module):
-        trunk_layers: int
-        branch_layers: int
-        hidden_dim: int
-        output_dim: int
-
-        def setup(self):
-            self.trunk_net = nn.Sequential([
-                nn.Dense(self.hidden_dim),
-                nn.tanh,
-                *[nn.Dense(self.hidden_dim), nn.tanh] * (self.trunk_layers - 1),
-                nn.Dense(self.output_dim)
-            ])
-
-            self.branch_net = nn.Sequential([
-                nn.Dense(self.hidden_dim),
-                nn.tanh,
-                *[nn.Dense(self.hidden_dim), nn.tanh] * (self.branch_layers - 1),
-                nn.Dense(self.output_dim)
-            ])
-
-        def __call__(self, x, a=None):
-            trunk_out = jax.vmap(self.trunk_net)(x)  # (batch, grid, out)
-            if a is not None:
-                branch_out = jax.vmap(self.branch_net)(a)  # (batch, out)
-                return jnp.sum(trunk_out * branch_out[:, None, :], axis=-1)
-            else:
-                return trunk_out.sum(axis=-1)
-
-
-    # Initialize model
+    # === Initialize model ===
     model = DeepONet(trunk_layers=3, branch_layers=3, hidden_dim=64, output_dim=grid_size)
-    # key = random.PRNGKey(0)
-
-    seed = 42
-    np.random.seed(seed)
-    pyrandom.seed(seed)
-    key = jax.random.PRNGKey(seed)
-
-
-    print_memory_usage("Before Model Initialization")
+    key = random.PRNGKey(seed)
     params = model.init(key, x_train[0:1], a_train[0:1])
-    print_memory_usage("After Model Initialization")
-
-    # Loss function
-    def loss_fn(params, x, a, true_u):
-        pred_u = model.apply(params, x, a)
-        return jnp.mean((pred_u - true_u) ** 2)
-
-    # Define optimizer
     optimizer = optax.adam(learning_rate=0.001)
     opt_state = optimizer.init(params)
 
-    # Training step
+    # === Composite Loss ===
+    def composite_loss(params, x, a, true_u, true_f):
+        pred_u = model.apply(params, x, a)
+        mse_term = jnp.mean((pred_u - true_u) ** 2)
+
+        # Taylor term
+        B, G, _ = x.shape
+        d4x, d4y = compute_fourth_derivatives(model, params, x.reshape(-1, 2), jnp.repeat(a, G, axis=0))
+        taylor_term = jnp.mean((d4x + d4y) ** 2)
+
+        # Physics residual term
+        lap_u = compute_laplacian(model, params, x.reshape(-1, 2), jnp.repeat(a, G, axis=0)).reshape(B, G)
+        f_flat = true_f.reshape(B, G)
+        physics_term = jnp.mean((lap_u - f_flat) ** 2)
+
+        # Weight regularization
+        weight_sq_sum = sum([jnp.sum(jnp.square(p)) for p in jax.tree_util.tree_leaves(params)])
+        reg_term = lambda_reg * weight_sq_sum
+
+        return mse_term + lambda_taylor * (h ** 2 / 12.0) * taylor_term + lambda_phys * physics_term + reg_term
+
     @jax.jit
-    def train_step(params, opt_state, x, a, true_u):
-        loss, grads = jax.value_and_grad(loss_fn)(params, x, a, true_u)
+    def train_step(params, opt_state, x, a, true_u, true_f):
+        loss, grads = value_and_grad(composite_loss)(params, x, a, true_u, true_f)
         updates, opt_state = optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss
 
-    # Tracking results efficiently
+    @jax.jit
+    def predict_fn(params, x, a):
+        return model.apply(params, x, a)
+
+    def predict_in_batches(x, a, batch_size=16):
+        return jnp.concatenate([predict_fn(params, x[i:i+batch_size], a[i:i+batch_size])
+                                for i in range(0, len(x), batch_size)], axis=0)
+
+    # === Train Loop ===
     training_results = []
-    final_predictions = {}
-
-    # Training loop
-    num_epochs = 100000  # Train for 100k epochs
-
-    # Choose batch size based on grid size
-    # if grid_size <= 500:
-    #     batch_size = 16
-    # elif grid_size <= 2500:
-    #     batch_size = 8
-    # else:
-    #     batch_size = 2
-
     if grid_size <= 500:
         batch_size = 64
     elif grid_size <= 2500:
         batch_size = 32
     else:
         batch_size = 8
+    num_batches = max(1, len(x_train) // batch_size)
 
-    if solution_type == "manufactured":
-        num_batches = len(x_train) // batch_size
-    else:
-        num_batches = max(1, len(x_train) // batch_size)
-
-    print_memory_usage("Before Training Loop")
-
-# === Training loop: Full-batch gradient descent ===
-    training_results = []
-
-    for epoch in trange(num_epochs, desc=f"Mesh {mesh_size[0]}x{mesh_size[1]}, {solution_type}"):
+    for epoch in trange(num_epochs, desc=f"Training DeepONet FEM MSE+Taylor+Physics+Regularization - {mesh_size} - Seed {seed} - λ_1={lambda_taylor} - λ_2={lambda_phys}"):
         epoch_start = time.time()
+        for batch in range(num_batches):
+            start, end = batch * batch_size, (batch + 1) * batch_size
+            x_batch = x_train[start:end]
+            a_batch = a_train[start:end]
+            u_batch = u_train[start:end]
+            f_batch = a_train[start:end]  # f = a for FEM inputs
+            params, opt_state, _ = train_step(params, opt_state, x_batch, a_batch, u_batch, f_batch)
 
-        # Full-batch update
-        params, opt_state, loss = train_step(params, opt_state, x_train, a_train, u_train)
-
-        # Every N epochs: evaluate and store results
         if epoch % 100 == 0:
-            @jax.jit
-            def predict_fn(params, x, a):
-                return model.apply(params, x, a)
-
-            def predict_in_batches(x, a, batch_size=16):
-                preds = []
-                for i in range(0, len(x), batch_size):
-                    x_batch = x[i:i+batch_size]
-                    a_batch = a[i:i+batch_size] if a is not None else None
-                    pred = predict_fn(params, x_batch, a_batch)
-                    preds.append(pred)
-                return jnp.concatenate(preds, axis=0)
-
             u_pred_train = predict_in_batches(x_train, a_train)
-            u_pred_test = predict_in_batches(x_test, a_test)
-            u_pred_heldout = predict_in_batches(x_heldout, a_heldout)
-
-            L2_error_train = jnp.linalg.norm(u_pred_train - u_train) / jnp.linalg.norm(u_train)
-            L2_error_test = jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test)
-            L2_error_heldout = jnp.linalg.norm(u_pred_heldout - u_heldout) / jnp.linalg.norm(u_heldout)
-
-            if solution_type == "manufactured":
-                training_results.append({
-                    "epoch": epoch,
-                    "L2_error_train": float(L2_error_train),
-                    "L2_error_test": float(L2_error_test),
-                    "generalization_error": float(L2_error_heldout)
-                })
-            elif solution_type == "FEM":
-                generalization_error_fem = float(jnp.linalg.norm(u_pred_heldout - u_heldout) / jnp.linalg.norm(u_heldout))
-                generalization_error_true = float(jnp.linalg.norm(u_pred_heldout - u_exact_heldout) / jnp.linalg.norm(u_exact_heldout))
-                training_results.append({
-                    "epoch": epoch,
-                    "L2_error_train": float(L2_error_train),
-                    "L2_error_test": float(L2_error_test),
-                    "generalization_error_fem": generalization_error_fem,
-                    "generalization_error_true": generalization_error_true
-                })
+            L2_error_train = float(jnp.linalg.norm(u_pred_train - u_train) / jnp.linalg.norm(u_train))
+            training_results.append({
+                "epoch": epoch,
+                "L2_error_train": L2_error_train,
+            })
 
             print_memory_usage(f"Epoch {epoch}")
-            print(f"Epoch {epoch}, Loss: {loss:.6f}, L2 Error Train: {L2_error_train:.6f}, L2 Error Test: {L2_error_test:.6f}")
+            print(f"[Epoch {epoch}] λ_1={lambda_taylor} - λ_2={lambda_phys}, L2 Error Train = {L2_error_train:.6f}")
             print(f"Epoch time: {time.time() - epoch_start:.2f}s")
 
+    # === Final Evaluation ===
+    u_pred_test = predict_in_batches(x_test, a_test)
+    L2_test = float(jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test))
+    gen_error_fem = float(jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test))
+    gen_error_true = float(jnp.linalg.norm(u_pred_test - u_manu_test) / jnp.linalg.norm(u_manu_test))
 
-    # Save results
-    results_filename = f"../results/deeponets/2/deeponet_results_{solution_type}_{mesh_size[0]}x{mesh_size[1]}.json"
-
-    results_data = {
-        "training_results": training_results,
-        "solution_type": solution_type
+    return {
+        "seed": seed,
+        "L2_error_test": L2_test,
+        "generalization_error_fem": gen_error_fem,
+        "generalization_error_true": gen_error_true,
     }
 
-    with open(results_filename, "w") as f:
-        json.dump(results_data, f)
+# === MAIN EXECUTION ===
+for mesh_size in mesh_sizes:
+    for lambda_taylor in lambda_taylor_list:
+        for lambda_phys in lambda_phys_list:
+            for lambda_reg in lambda_reg_list:
+                results_dir = f"../results/deeponets/tayph/{mesh_size[0]}x{mesh_size[1]}"
+                os.makedirs(results_dir, exist_ok=True)
 
+                all_results = []
+                for seed in seeds:
+                    result = run_training_for_seed(seed, mesh_size, lambda_taylor, lambda_phys, lambda_reg)
+                    all_results.append(result)
 
-    print(f"Training complete using {solution_type} solutions. Results saved to {results_filename}.")
-    print_memory_usage("After Training")
+                    file_path = os.path.join(results_dir, f"deeponet_results_FEM_lambdaT{lambda_taylor}_lambdaP{lambda_phys}_reg{lambda_reg}_seed{seed}.json")
+                    with open(file_path, "w") as f:
+                        json.dump(result, f, indent=2)
+
+                # Save average
+                avg_result = {k: float(np.mean([r[k] for r in all_results]))
+                    for k in all_results[0] if k != "seed"
+                }
+                avg_path = os.path.join(results_dir, f"deeponet_results_FEM_lambdaT{lambda_taylor}_lambdaP{lambda_phys}_reg{lambda_reg}_avg.json")
+                with open(avg_path, "w") as f:
+                    json.dump(avg_result, f, indent=2)
+
+                print(f"[Saved] Averaged results -> {avg_path}")
+

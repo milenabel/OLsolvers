@@ -11,7 +11,8 @@ import os
 num_samples = 1000
 n_value = 8  # Number of basis functions
 Lx, Ly = 12.0, 12.0  # Domain size
-mesh_sizes = [(3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (20, 20), (24, 24), (48, 48), (96, 96)]
+# mesh_sizes = [(3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (20, 20), (24, 24), (48, 48), (96, 96)]
+mesh_sizes = [(20, 20)]
 base_path = "../results/manufactured"
 
 # Create base directory if needed
@@ -38,7 +39,8 @@ def generate_sample(sample_idx, V, msh):
 for Nx, Ny in mesh_sizes:
     print(f"Generating dataset for mesh {Nx}x{Ny}")
     comm = MPI.COMM_WORLD
-    msh = mesh.create_rectangle(comm, [(0.0, 0.0), (Lx, Ly)], [Nx, Ny], mesh.CellType.triangle)
+    # msh = mesh.create_rectangle(comm, [(0.0, 0.0), (Lx, Ly)], [Nx, Ny], mesh.CellType.triangle)
+    msh = mesh.create_rectangle(comm, [(0.0, 0.0), (Lx, Ly)], [Nx, Ny], mesh.CellType.quadrilateral)
     V = fem.functionspace(msh, ("Lagrange", 1))
 
     dataset = []
