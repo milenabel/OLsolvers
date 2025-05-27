@@ -40,7 +40,7 @@ def compute_fourth_derivatives(model, params, x, a):
     return jax.vmap(fourth_deriv_scalar)(x, a)
 
 # === TRAINING FUNCTION ===
-def run_training_for_seed(seed, mesh_size, lambda_taylor):
+def run_training_for_seed(seed, mesh_size, lambda_taylor, results_dir):
     split_dir = f"../results/splits/{mesh_size[0]}x{mesh_size[1]}"
     data_dir = f"../results/{'manufactured' if solution_type == 'manufactured' else 'general'}"
 
@@ -153,7 +153,7 @@ def run_training_for_seed(seed, mesh_size, lambda_taylor):
             u_batch = u_train[start:end]
             params, opt_state, _ = train_step(params, opt_state, x_batch, a_batch, u_batch)
 
-        if epoch % 100 == 0:
+        if epoch % 1000 == 0:
             u_pred_train = predict_in_batches(x_train, a_train)
 
             # Compute L2 errors
@@ -169,27 +169,40 @@ def run_training_for_seed(seed, mesh_size, lambda_taylor):
             print(f"[Epoch {epoch}] λ = {lambda_taylor}, L2 Error Train = {L2_error_train:.6f}")
             print(f"Epoch time: {time.time() - epoch_start:.2f}s")
 
+            temp_result_dict = {
+                "seed": seed,
+                "training_results": training_results,
+            }
+            file_path = os.path.join(results_dir, f"deeponet_results_{solution_type}_lambda{lambda_taylor}_seed{seed}.json")
+            with open(file_path, "w") as f:
+                json.dump(temp_result_dict, f, indent=2)
+
     # === Final Evaluation ===
     
     u_pred_test = predict_in_batches(x_test, a_test)
 
     L2_test = float(jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test))
 
-    result_dict = {
-        "seed": seed,
-        "L2_error_test": L2_test,
-        "lambda_taylor": lambda_taylor
-    }
-
     if solution_type == "FEM":
         gen_error_fem = float(jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test))
         gen_error_true = float(jnp.linalg.norm(u_pred_test - u_manu_test) / jnp.linalg.norm(u_manu_test))
-        result_dict["generalization_error_fem"] = gen_error_fem
-        result_dict["generalization_error_true"] = gen_error_true
 
     elif solution_type == "manufactured":
         gen_error_true = float(jnp.linalg.norm(u_pred_test - u_manu_test) / jnp.linalg.norm(u_manu_test))
-        result_dict["generalization_error_true"] = gen_error_true
+
+    result_dict = {
+        "seed": seed,
+        "training_results": training_results,
+        "L2_error_test": L2_test,
+        "lambda_taylor": lambda_taylor,
+        "generalization_error_true": gen_error_true,
+    }
+    if solution_type == "FEM":
+        result_dict["generalization_error_fem"] = gen_error_fem
+
+    file_path = os.path.join(results_dir, f"deeponet_results_{solution_type}_lambda{lambda_taylor}_seed{seed}.json")
+    with open(file_path, "w") as f:
+        json.dump(result_dict, f, indent=2)
 
     return result_dict
 
@@ -201,7 +214,7 @@ for mesh_size in mesh_sizes:
 
         all_results = []
         for seed in seeds:
-            result = run_training_for_seed(seed, mesh_size, lambda_taylor)
+            result = run_training_for_seed(seed, mesh_size, lambda_taylor, results_dir)
             all_results.append(result)
 
             # Save per-seed results
@@ -211,8 +224,9 @@ for mesh_size in mesh_sizes:
 
         # Save averaged results
         avg_result = {}
+        
         for key in all_results[0]:
-            if key == "seed": continue
+            if key in ("seed", "training_results"): continue
             avg_result[key] = float(np.mean([r[key] for r in all_results]))
 
         avg_file = os.path.join(results_dir, f"deeponet_results_{solution_type}_lambda{lambda_taylor}_avg.json")

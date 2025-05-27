@@ -29,16 +29,23 @@
 # Exit on error
 set -e
 
-# echo "=== Running train_deeponet.py ==="
-# python3 train_deeponet.py
+echo "=== Running train_deeponet.py ==="
+python3 train_deeponet.py
 
-echo "=== Running try.py ==="
-python3 try.py
+echo "=== Running try2.py ==="
+python3 try2.py
 
 echo "=== Running train_deeponet_taylor.py ==="
 python3 train_deeponet_taylor.py
 
 echo "=== Running train_deeponet_taylor_split.py ==="
 python3 train_deeponet_taylor_split.py
+
+echo "=== Running try.py ==="
+python3 try.py
+
+
+
+
 
 echo "=== All scripts finished successfully ==="

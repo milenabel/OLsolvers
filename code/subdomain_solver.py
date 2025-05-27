@@ -1,166 +1,124 @@
 import os
+import json
 import numpy as np
-import pandas as pd
 from mpi4py import MPI
 import ufl
-from dolfinx import fem, io, mesh
+from dolfinx import fem, mesh
 from dolfinx.fem.petsc import LinearProblem
-from ufl import dx, grad, inner, div
+from ufl import dx, grad, inner
+from scipy.interpolate import LinearNDInterpolator
+from tqdm import trange
 
-# Path to the general solver CSV
-GENERAL_RESULTS_CSV = "../results/general/poisson_error_norms.csv"
+def solve_subdomains_batched(global_mesh_size, domain_size, u_values_list, subdomain_bounds, sub_mesh_size, results_dir="../results/subdomains"):
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
 
-class SubdomainSolver:
-    def __init__(self, global_mesh_size, global_solution_values, subdomain_bounds, num_elements, results_dir="../results/subdomains"):
-        self.global_mesh_size = global_mesh_size  # Store mesh size of the global solver
-        self.global_solution_values = global_solution_values  # Store L2, H1, Rel L2 from CSV
-        self.subdomain_bounds = subdomain_bounds
-        self.num_elements = num_elements
-        self.results_dir = results_dir
-        os.makedirs(self.results_dir, exist_ok=True)
+    # === Reconstruct global mesh once ===
+    msh_global = mesh.create_rectangle(comm, [(0.0, 0.0), domain_size], global_mesh_size, mesh.CellType.quadrilateral)
+    global_coords = msh_global.geometry.x[:, :2]
 
-    def solve(self):
-        """Solves the Poisson equation on a subdomain using interpolated global solution as boundary conditions."""
-        comm = MPI.COMM_WORLD
-        rank = comm.Get_rank()
+    coords_sub = None
+    u_values_all = []
+    L2_norms = []
+    H1_norms = []
+    rel_L2_norms = []
 
-        # Create a subdomain mesh using the selected refinement
+    for sample_id in trange(len(u_values_list), desc=f"{global_mesh_size} → {sub_mesh_size}"):
+        u_global = np.array(u_values_list[sample_id], dtype=np.float64)
+        u_interp = LinearNDInterpolator(global_coords, u_global)
+
+        # Create subdomain mesh
         msh_sub = mesh.create_rectangle(
-            comm=MPI.COMM_WORLD,
-            points=((self.subdomain_bounds[0], self.subdomain_bounds[2]), 
-                    (self.subdomain_bounds[1], self.subdomain_bounds[3])),
-            n=self.num_elements,
+            comm,
+            points=((subdomain_bounds[0], subdomain_bounds[2]), (subdomain_bounds[1], subdomain_bounds[3])),
+            n=sub_mesh_size,
             cell_type=mesh.CellType.quadrilateral,
         )
         V_sub = fem.functionspace(msh_sub, ("Lagrange", 1))
-
         u = ufl.TrialFunction(V_sub)
         v = ufl.TestFunction(V_sub)
 
-        # Use the global solution values (read from CSV)
-        L2_norm_global, H1_norm_global, relative_L2_global = self.global_solution_values
-
-        # Create a function for Dirichlet boundary conditions
-        bc_function = fem.Function(V_sub)
-        bc_function.interpolate(lambda x: np.full(x.shape[1], L2_norm_global))  # Fill with L2 norm value
-
-        # Apply Dirichlet BCs using the interpolated function
+        # Interpolate global solution on boundary
         facets = mesh.locate_entities_boundary(msh_sub, msh_sub.topology.dim - 1, lambda x: np.full(x.shape[1], True))
-        dofs = fem.locate_dofs_topological(V_sub, 1, facets)
-        bc = fem.dirichletbc(bc_function, dofs)
+        dofs = fem.locate_dofs_topological(V_sub, msh_sub.topology.dim - 1, facets)
 
-        # Weak form with zero source term
-        dx_sub = ufl.Measure("dx", domain=msh_sub)
-        a = inner(grad(u), grad(v)) * dx_sub
-        L = inner(fem.Constant(msh_sub, 0.0), v) * dx_sub
+        bc_fn = fem.Function(V_sub)
+        dof_coords = V_sub.tabulate_dof_coordinates()[dofs][:, :2]
+        bc_vals = u_interp(dof_coords[:, 0], dof_coords[:, 1])
+        bc_fn.x.array[dofs] = np.nan_to_num(bc_vals, nan=0.0)
 
+        bc = fem.dirichletbc(bc_fn, dofs)
+
+        # Solve Poisson
+        a = inner(grad(u), grad(v)) * dx
+        L = inner(fem.Constant(msh_sub, 0.0), v) * dx
         problem = LinearProblem(a, L, bcs=[bc], petsc_options={"ksp_type": "preonly", "pc_type": "lu"})
         uh = problem.solve()
 
-        # Compute error norms
-        error_L2_form = fem.form(inner(uh - bc_function, uh - bc_function) * dx_sub)
-        L2_norm = np.sqrt(msh_sub.comm.allreduce(fem.assemble_scalar(error_L2_form), op=MPI.SUM))
+        # Store error metrics
+        L2 = np.sqrt(msh_sub.comm.allreduce(fem.assemble_scalar(fem.form(inner(uh - bc_fn, uh - bc_fn) * dx)), op=MPI.SUM))
+        H1 = np.sqrt(msh_sub.comm.allreduce(fem.assemble_scalar(fem.form(inner(grad(uh - bc_fn), grad(uh - bc_fn)) * dx)), op=MPI.SUM))
+        proj = np.sqrt(msh_sub.comm.allreduce(fem.assemble_scalar(fem.form(inner(bc_fn, bc_fn) * dx)), op=MPI.SUM))
+        rel = L2 / proj if proj > 0 else 0.0
 
-        error_H1_form = fem.form(inner(grad(uh - bc_function), grad(uh - bc_function)) * dx_sub)
-        H1_norm = np.sqrt(msh_sub.comm.allreduce(fem.assemble_scalar(error_H1_form), op=MPI.SUM))
+        u_values_all.append(uh.x.array.tolist())
+        L2_norms.append(float(L2))
+        H1_norms.append(float(H1))
+        rel_L2_norms.append(float(rel))
 
-        # Compute relative L2 error norm
-        projected_L2_form = fem.form(inner(bc_function, bc_function) * dx_sub)
-        projected_L2_norm = np.sqrt(msh_sub.comm.allreduce(fem.assemble_scalar(projected_L2_form), op=MPI.SUM))
+        if coords_sub is None:
+            coords_sub = msh_sub.geometry.x[:, :2].tolist()
 
-        relative_L2_error = L2_norm / projected_L2_norm
-
-        print(f"Subdomain {self.subdomain_bounds}, Mesh {self.num_elements} → L2: {L2_norm}, H1: {H1_norm}, Rel L2: {relative_L2_error}")
-
-        # Save results to CSV (only rank 0 writes to file)
-        if rank == 0:
-            results_filename = os.path.join(self.results_dir, "subdomain_error_norms.csv")
-            os.makedirs(os.path.dirname(results_filename), exist_ok=True)
-
-            row = [
-                int(self.global_mesh_size[0]), int(self.global_mesh_size[1]),  # Global mesh size
-                float(self.subdomain_bounds[0]), float(self.subdomain_bounds[1]),  # Subdomain x bounds
-                float(self.subdomain_bounds[2]), float(self.subdomain_bounds[3]),  # Subdomain y bounds
-                int(self.num_elements[0]), int(self.num_elements[1]),  # Subdomain mesh size (Nx, Ny)
-                float(L2_norm), float(H1_norm), float(relative_L2_error)  # Error norms
-            ]
-
-            df = pd.DataFrame([row], columns=[
-                "global_mesh_x", "global_mesh_y", 
-                "sub_x0", "sub_x1", "sub_y0", "sub_y1", 
-                "sub_mesh_x", "sub_mesh_y", 
-                "L2_norm", "H1_norm", "Relative_L2_norm"
-            ])
-
-            # Debug print before writing
-            print(f"Writing to CSV: {results_filename}")
-            
-            write_header = not os.path.exists(results_filename)
-            df.to_csv(results_filename, mode="a", header=write_header, index=False)
-
-            # Debug print after writing
-            print(f"Successfully wrote to {results_filename}")
-        
-        # Evaluate solution on mesh vertices
-        subdomain_coords = msh_sub.geometry.x  # Shape: (num_points, 2)
-        uh_vals = uh.x.array  # Convert to NumPy array
-
-        # Save the solution and mesh metadata (only rank 0)
-        if rank == 0:
-            data = {
-                "global_mesh_x": int(self.global_mesh_size[0]),
-                "global_mesh_y": int(self.global_mesh_size[1]),
-                "sub_x0": float(self.subdomain_bounds[0]),
-                "sub_x1": float(self.subdomain_bounds[1]),
-                "sub_y0": float(self.subdomain_bounds[2]),
-                "sub_y1": float(self.subdomain_bounds[3]),
-                "sub_mesh_x": int(self.num_elements[0]),
-                "sub_mesh_y": int(self.num_elements[1]),
-                "L2_norm": float(L2_norm),
-                "H1_norm": float(H1_norm),
-                "Relative_L2_norm": float(relative_L2_error),
-                "coords": subdomain_coords.tolist(),  # Mesh vertex coords
-                "u_values": uh_vals.tolist()          # DoF values at those points
-            }
-
-            # Save as JSON for easier loading into DeepONet
-            json_filename = f"{self.results_dir}/fem_subdomain_g{self.global_mesh_size[0]}x{self.global_mesh_size[1]}_s{self.num_elements[0]}x{self.num_elements[1]}.json"
-            with open(json_filename, "w") as f:
-                import json
-                json.dump(data, f)
-
-            print(f"Saved subdomain solution to: {json_filename}")
-
-        return msh_sub, uh
-
+    if rank == 0:
+        out = {
+            "global_mesh": global_mesh_size,
+            "domain_size": domain_size,
+            "subdomain": subdomain_bounds,
+            "sub_mesh": sub_mesh_size,
+            "coords": coords_sub,
+            "u_values": u_values_all,
+            "L2_norms": L2_norms,
+            "H1_norms": H1_norms,
+            "Relative_L2_norms": rel_L2_norms
+        }
+        Nx, Ny = global_mesh_size
+        sx, sy = sub_mesh_size
+        save_path = f"{results_dir}/fem_subdomain_g{Nx}x{Ny}_s{sx}x{sy}.json"
+        os.makedirs(results_dir, exist_ok=True)
+        with open(save_path, "w") as f:
+            json.dump(out, f)
+        print(f"[Saved] {save_path}")
 
 if __name__ == "__main__":
-    mesh_sizes = [(3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (20, 20), (24, 24), (48, 48), (96, 96)]
-    subdomain_refinements = [(3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (16, 16), (20, 20), (24, 24), (32, 32), (48, 48), (64, 64), (96, 96), (128, 128), (192, 192)]
-    
-    # Load the global solver results from CSV
-    global_results_df = pd.read_csv(GENERAL_RESULTS_CSV)
+    # global_mesh_sizes = [(20, 20), (24, 24), (48, 48), (96, 96)]
+    global_mesh_sizes = [(20, 20)]
+    subdomain_refinements = [
+        (3, 3), (4, 4), (6, 6), (8, 8), (12, 12), (16, 16),
+        (20, 20), (24, 24), (32, 32), (48, 48), (64, 64),
+        (96, 96), (128, 128), (192, 192)
+    ]
+    subdomains = [(0, 4, 0, 4)]
 
-    # Convert the dataframe into a dictionary for easy lookup
-    global_solutions = {
-        (int(row["Nx"]), int(row["Ny"])): (row["L2 Norm"], row["H1 Norm"], row["Relative L2 Norm"])
-        for _, row in global_results_df.iterrows()
-    }
+    for gsize in global_mesh_sizes:
+        Nx, Ny = gsize
+        fpath = f"../results/general/poisson_dataset_{Nx}x{Ny}.json"
+        if not os.path.exists(fpath):
+            print(f"[Skip] No dataset for {Nx}x{Ny}")
+            continue
 
-    # Define the subdomain (currently using only one, but can be expanded)
-    subdomains = [(0, 4, 0, 4)]  # (x0, x1, y0, y1)
+        with open(fpath, "r") as f:
+            data = json.load(f)
 
-    for global_mesh_size in mesh_sizes:
-        print(f"\n Using global solver results for mesh size {global_mesh_size}")
+        domain_size = tuple(data["domain_size"])
+        u_values_list = data["u_values"]
 
-        # Get the stored global solution values
-        global_solution_values = global_solutions[global_mesh_size]
-
-        for subdomain_bounds in subdomains:
-            print(f"\n Using subdomain {subdomain_bounds} with boundary conditions from {global_mesh_size}")
-            
-            for sub_mesh_size in subdomain_refinements:
-                print(f"  Refining subdomain with mesh size {sub_mesh_size}")
-
-                sub_solver = SubdomainSolver(global_mesh_size, global_solution_values, subdomain_bounds, sub_mesh_size)
-                sub_solver.solve()
+        for subdomain in subdomains:
+            for sub_mesh in subdomain_refinements:
+                solve_subdomains_batched(
+                    global_mesh_size=gsize,
+                    domain_size=domain_size,
+                    u_values_list=u_values_list,
+                    subdomain_bounds=subdomain,
+                    sub_mesh_size=sub_mesh,
+                    results_dir="../results/subdomains"
+                )

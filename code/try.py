@@ -15,7 +15,7 @@ import psutil
 # === SETTINGS ===
 solution_type = "FEM"
 mesh_sizes = [(20, 20)]
-lambda_taylor_list = [0.1, 0.01, 0.001]
+lambda_taylor_list = [1, 0.1, 0.01, 0.001]
 lambda_phys_list = [1, 0.1, 0.01, 0.001]
 lambda_reg_list = [1e-6]
 seeds = [7, 42, 77]
@@ -59,7 +59,7 @@ def compute_laplacian(model, params, x, a):
     return jax.vmap(laplace_scalar)(x, a)
 
 # === TRAINING FUNCTION ===
-def run_training_for_seed(seed, mesh_size, lambda_taylor, lambda_phys, lambda_reg):
+def run_training_for_seed(seed, mesh_size, lambda_taylor, lambda_phys, lambda_reg, results_dir):
     split_dir = f"../results/splits/{mesh_size[0]}x{mesh_size[1]}"
     data_dir = "../results/general"
 
@@ -156,7 +156,7 @@ def run_training_for_seed(seed, mesh_size, lambda_taylor, lambda_phys, lambda_re
             f_batch = a_train[start:end]  # f = a for FEM inputs
             params, opt_state, _ = train_step(params, opt_state, x_batch, a_batch, u_batch, f_batch)
 
-        if epoch % 100 == 0:
+        if epoch % 1000 == 0:
             u_pred_train = predict_in_batches(x_train, a_train)
             L2_error_train = float(jnp.linalg.norm(u_pred_train - u_train) / jnp.linalg.norm(u_train))
             training_results.append({
@@ -168,18 +168,41 @@ def run_training_for_seed(seed, mesh_size, lambda_taylor, lambda_phys, lambda_re
             print(f"[Epoch {epoch}] λ_1={lambda_taylor} - λ_2={lambda_phys}, L2 Error Train = {L2_error_train:.6f}")
             print(f"Epoch time: {time.time() - epoch_start:.2f}s")
 
+            temp_result_dict = {
+                "seed": seed,
+                "training_results": training_results,
+                "lambda_taylor": lambda_taylor,
+                "lambda_phys": lambda_phys,
+                "lambda_reg": lambda_reg
+            }
+
+            file_path = os.path.join(results_dir, f"deeponet_results_FEM_lambdaT{lambda_taylor}_lambdaP{lambda_phys}_reg{lambda_reg}_seed{seed}.json")
+            with open(file_path, "w") as f:
+                json.dump(temp_result_dict, f, indent=2)
+
     # === Final Evaluation ===
     u_pred_test = predict_in_batches(x_test, a_test)
     L2_test = float(jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test))
     gen_error_fem = float(jnp.linalg.norm(u_pred_test - u_test) / jnp.linalg.norm(u_test))
     gen_error_true = float(jnp.linalg.norm(u_pred_test - u_manu_test) / jnp.linalg.norm(u_manu_test))
 
-    return {
+    result_dict = {
         "seed": seed,
+        "training_results": training_results,
         "L2_error_test": L2_test,
         "generalization_error_fem": gen_error_fem,
         "generalization_error_true": gen_error_true,
+        "lambda_taylor": lambda_taylor,
+        "lambda_phys": lambda_phys,
+        "lambda_reg": lambda_reg
     }
+
+    file_path = os.path.join(results_dir, f"deeponet_results_FEM_lambdaT{lambda_taylor}_lambdaP{lambda_phys}_reg{lambda_reg}_seed{seed}.json")
+    with open(file_path, "w") as f:
+        json.dump(result_dict, f, indent=2)
+
+    return result_dict
+
 
 # === MAIN EXECUTION ===
 for mesh_size in mesh_sizes:
@@ -191,7 +214,7 @@ for mesh_size in mesh_sizes:
 
                 all_results = []
                 for seed in seeds:
-                    result = run_training_for_seed(seed, mesh_size, lambda_taylor, lambda_phys, lambda_reg)
+                    result = run_training_for_seed(seed, mesh_size, lambda_taylor, lambda_phys, lambda_reg, results_dir)
                     all_results.append(result)
 
                     file_path = os.path.join(results_dir, f"deeponet_results_FEM_lambdaT{lambda_taylor}_lambdaP{lambda_phys}_reg{lambda_reg}_seed{seed}.json")
@@ -199,9 +222,16 @@ for mesh_size in mesh_sizes:
                         json.dump(result, f, indent=2)
 
                 # Save average
-                avg_result = {k: float(np.mean([r[k] for r in all_results]))
-                    for k in all_results[0] if k != "seed"
-                }
+                avg_result = {}
+                for k in all_results[0]:
+                    if k in ("seed", "training_results"):
+                        continue
+                    values = [r[k] for r in all_results]
+                    if isinstance(values[0], (float, int)):
+                        avg_result[k] = float(np.mean(values))
+
+
+                
                 avg_path = os.path.join(results_dir, f"deeponet_results_FEM_lambdaT{lambda_taylor}_lambdaP{lambda_phys}_reg{lambda_reg}_avg.json")
                 with open(avg_path, "w") as f:
                     json.dump(avg_result, f, indent=2)
