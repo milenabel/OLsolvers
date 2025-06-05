@@ -1,0 +1,6 @@
+{
+  "L2_error_test": 0.6077428857485453,
+  "lambda_taylor": 0.001,
+  "generalization_error_true": 0.7404012680053711,
+  "generalization_error_fem": 0.6077428857485453
+}

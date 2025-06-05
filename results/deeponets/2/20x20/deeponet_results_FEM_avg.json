@@ -1,5 +1,5 @@
 {
-  "L2_error_test": 0.6021416385968527,
-  "generalization_error_fem": 0.6021416385968527,
-  "generalization_error_true": 0.7416542172431946
+  "L2_error_test": 0.602141797542572,
+  "generalization_error_true": 0.7416537801424662,
+  "generalization_error_fem": 0.602141797542572
 }

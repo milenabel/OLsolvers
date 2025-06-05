@@ -1,0 +1,5 @@
+{
+  "L2_error_test": 0.9997845888137817,
+  "generalization_error_fem": 0.9997845888137817,
+  "generalization_error_true": 1.0000397364298503
+}
